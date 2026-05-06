@@ -5,7 +5,7 @@ import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { File } from "node:buffer";
 import { randomUUID } from "node:crypto";
@@ -164,6 +164,32 @@ app.post("/api/node/upload-asset", upload.single("asset"), async (req, res) => {
   });
 });
 
+app.post("/api/node/upload-style-collage", upload.single("asset"), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "No style collage uploaded." });
+  }
+
+  const nodeId = safePathSegment(req.body.nodeId || "style");
+  const styleDir = path.join(uploadsDir, "styles", nodeId);
+  const storedFileName = path.join("styles", nodeId, "STYLE.png");
+  const targetPath = path.join(styleDir, "STYLE.png");
+
+  await mkdir(styleDir, { recursive: true });
+  await rm(targetPath, { force: true });
+  await rename(req.file.path, targetPath);
+
+  res.json({
+    asset: {
+      localUrl: `/uploads/${storedFileName.split(path.sep).join("/")}`,
+      fileName: "STYLE.png",
+      storedFileName: storedFileName.split(path.sep).join("/"),
+      mimeType: "image/png",
+      size: req.file.size,
+      mediaType: "image"
+    }
+  });
+});
+
 app.post("/api/node/generate-image", async (req, res) => {
   try {
     if (!process.env.GOOGLE_API_KEY) {
@@ -177,11 +203,16 @@ app.post("/api/node/generate-image", async (req, res) => {
 
     const model = normalizeImageModel(req.body.model);
     const imagePromptUrls = Array.isArray(req.body.imagePromptUrls) ? req.body.imagePromptUrls.filter(isLocalAssetUrl) : [];
+    const imagePromptLabels = Array.isArray(req.body.imagePromptLabels) ? req.body.imagePromptLabels : [];
     const parts = [{ text: prompt }];
 
-    for (const imagePromptUrl of imagePromptUrls) {
+    for (const [index, imagePromptUrl] of imagePromptUrls.entries()) {
       const asset = await readLocalAsset(imagePromptUrl);
       if (!asset.mimeType.startsWith("image/")) continue;
+      const label = cleanImagePromptLabel(imagePromptLabels[index]);
+      if (label) {
+        parts.push({ text: `Reference image label: ${label}` });
+      }
       parts.push({
         inlineData: {
           mimeType: asset.mimeType,
@@ -601,6 +632,20 @@ function cleanReferenceName(value) {
     .slice(0, 28);
 }
 
+function cleanImagePromptLabel(value) {
+  return String(value || "")
+    .replace(/[^A-Za-z0-9_. -]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
+
+function safePathSegment(value) {
+  return String(value || "style")
+    .replace(/[^A-Za-z0-9_-]/g, "-")
+    .slice(0, 80) || "style";
+}
+
 function uniqueReferenceName(value, usedNames) {
   const fallback = cleanReferenceName(value) || "Image";
   let name = fallback;
@@ -798,14 +843,29 @@ async function uploadLocalOutputToFal(publicPath) {
 }
 
 async function readLocalAsset(publicPath) {
-  const fileName = path.basename(publicPath);
-  const filePath = path.join(publicPath.startsWith("/uploads/") ? uploadsDir : outputsDir, fileName);
+  const { fileName, filePath } = resolveLocalAssetPath(publicPath);
   const buffer = await readFile(filePath);
 
   return {
     fileName,
     buffer,
     mimeType: mimeForExtension(path.extname(fileName).toLowerCase())
+  };
+}
+
+function resolveLocalAssetPath(publicPath) {
+  const isUpload = publicPath.startsWith("/uploads/");
+  const prefix = isUpload ? "/uploads/" : "/outputs/";
+  const root = isUpload ? uploadsDir : outputsDir;
+  const relativePath = path.normalize(decodeURIComponent(publicPath.slice(prefix.length)));
+
+  if (path.isAbsolute(relativePath) || relativePath.startsWith("..")) {
+    throw new Error("Invalid local asset path.");
+  }
+
+  return {
+    fileName: path.basename(relativePath),
+    filePath: path.join(root, relativePath)
   };
 }
 

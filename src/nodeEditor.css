@@ -258,6 +258,10 @@
   width: 365px;
 }
 
+.node-card.style {
+  width: 335px;
+}
+
 .node-card.videoModel {
   width: 370px;
 }
@@ -434,6 +438,163 @@
 }
 
 .media-node-body .upload-error {
+  color: #f3a288;
+}
+
+.style-node-body {
+  display: grid;
+  gap: 10px;
+  padding: 10px 18px 18px;
+}
+
+.style-output-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+  color: rgba(244, 240, 232, 0.42);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.style-collage {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  min-height: 180px;
+  overflow: hidden;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.style-collage.count-1 {
+  grid-template-columns: 1fr;
+}
+
+.style-collage.count-5,
+.style-collage.count-6 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.style-collage.empty {
+  display: grid;
+  gap: 8px;
+  place-items: center;
+  color: rgba(244, 240, 232, 0.44);
+}
+
+.style-collage-cell {
+  position: relative;
+  min-height: 82px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: #0a0a0a;
+}
+
+.style-collage-cell img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 82px;
+  object-fit: cover;
+}
+
+.style-collage-cell button {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  place-items: center;
+  border-radius: 50%;
+  color: #f4f0e8;
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.style-collage.locked {
+  border-color: rgba(221, 198, 49, 0.26);
+  box-shadow: inset 0 0 0 1px rgba(221, 198, 49, 0.1);
+}
+
+.style-actions {
+  display: grid;
+  grid-template-columns: 1fr 42px;
+  gap: 8px;
+}
+
+.style-upload-button {
+  display: inline-grid;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: rgba(244, 240, 232, 0.74);
+  background: rgba(255, 255, 255, 0.055);
+  cursor: pointer;
+}
+
+.style-upload-button:hover {
+  background: rgba(221, 198, 49, 0.12);
+}
+
+.style-upload-button.disabled {
+  cursor: not-allowed;
+  opacity: 0.44;
+}
+
+.style-upload-button input {
+  display: none;
+}
+
+.style-lock-button {
+  display: grid;
+  min-height: 38px;
+  padding: 0;
+  place-items: center;
+  border-radius: 8px;
+  color: rgba(244, 240, 232, 0.74);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.style-lock-button.locked {
+  color: #101010;
+  background: #ddc631;
+}
+
+.style-lock-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.style-meta {
+  display: flex;
+  justify-content: space-between;
+  color: rgba(244, 240, 232, 0.48);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.style-node-body small {
+  overflow: hidden;
+  width: 100%;
+  color: rgba(244, 240, 232, 0.58);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.style-node-body .upload-status {
+  color: #ddc631;
+}
+
+.style-node-body .upload-error {
   color: #f3a288;
 }
 

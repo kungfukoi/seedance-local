@@ -5,12 +5,15 @@ import {
   FileImage,
   Film,
   ImagePlus,
+  Lock,
   PanelLeftClose,
   PanelLeftOpen,
+  Palette,
   Plus,
   Save,
   Trash2,
   Type,
+  Unlock,
   Video,
   X
 } from "lucide-react";
@@ -19,6 +22,7 @@ import "./nodeEditor.css";
 const nodeCatalog = [
   { type: "text", label: "Text", icon: Type },
   { type: "image", label: "Image", icon: FileImage },
+  { type: "style", label: "Style", icon: Palette },
   { type: "video", label: "Video", icon: Video },
   { type: "audio", label: "Audio", icon: FileAudio },
   { type: "imageModel", label: "Image Model", icon: ImagePlus },
@@ -31,6 +35,10 @@ const portColors = {
   video: "#58ce63",
   audio: "#ff8b35"
 };
+
+const maxStyleImages = 6;
+const stylePromptSuffix =
+  "Only use the uploaded collage reference images labeled STYLE.png as a style reference for the color grading, grain style, and camera qualities. The generated image should NOT take content from the collage reference image labeled STYLE.png directly, only use the collage references as a style transfer guide.";
 
 const initialNodes = [
   {
@@ -110,6 +118,7 @@ export default function NodeEditor() {
   const [toolbarCollapsed, setToolbarCollapsed] = React.useState(false);
   const [saveStatus, setSaveStatus] = React.useState("");
   const [runningNodeId, setRunningNodeId] = React.useState(null);
+  const [compilingStyleNodeId, setCompilingStyleNodeId] = React.useState(null);
 
   const incomingByNode = React.useMemo(() => buildIncomingByNode(nodes, edges), [nodes, edges]);
   const connectedPortKeys = React.useMemo(() => buildConnectedPortKeys(edges), [edges]);
@@ -319,6 +328,128 @@ export default function NodeEditor() {
     }
   }
 
+  async function uploadStyleImages(node, fileList) {
+    if (node.data.locked) return;
+
+    const existingImages = Array.isArray(node.data.styleImages) ? node.data.styleImages : [];
+    const files = Array.from(fileList || [])
+      .filter((file) => file.type.startsWith("image/"))
+      .slice(0, maxStyleImages - existingImages.length);
+
+    if (!files.length) return;
+
+    pushUndoSnapshot();
+    updateNode(node.id, {
+      status: "uploading",
+      error: "",
+      activated: false,
+      resultUrl: ""
+    });
+
+    try {
+      const uploadedImages = [];
+      for (const file of files) {
+        const form = new FormData();
+        form.append("asset", file);
+        form.append("nodeType", "style");
+
+        const response = await fetch("/api/node/upload-asset", {
+          method: "POST",
+          body: form
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Upload failed.");
+
+        uploadedImages.push({
+          id: `style-image-${Date.now()}-${uploadedImages.length}`,
+          fileName: data.asset.fileName,
+          storedFileName: data.asset.storedFileName,
+          mimeType: data.asset.mimeType,
+          localUrl: data.asset.localUrl
+        });
+      }
+
+      updateNode(node.id, {
+        styleImages: [...existingImages, ...uploadedImages].slice(0, maxStyleImages),
+        status: "ready",
+        error: ""
+      });
+    } catch (error) {
+      updateNode(node.id, {
+        status: "error",
+        error: error.message
+      });
+    }
+  }
+
+  function removeStyleImage(nodeId, imageId) {
+    pushUndoSnapshot();
+    updateNode(nodeId, {
+      styleImages: nodes.find((node) => node.id === nodeId)?.data.styleImages?.filter((image) => image.id !== imageId) || [],
+      activated: false,
+      locked: false,
+      resultUrl: "",
+      fileName: "",
+      error: ""
+    });
+    setEdges((current) => current.filter((edge) => edge.from.nodeId !== nodeId));
+  }
+
+  async function activateStyleNode(node) {
+    const styleImages = Array.isArray(node.data.styleImages) ? node.data.styleImages.filter((image) => image.localUrl) : [];
+    if (!styleImages.length) {
+      updateNode(node.id, { error: "Upload at least one image." });
+      return;
+    }
+
+    try {
+      setCompilingStyleNodeId(node.id);
+      updateNode(node.id, { status: "compiling", error: "" });
+      const collageBlob = await createStyleCollageBlob(styleImages);
+      const styleFile = new File([collageBlob], "STYLE.png", { type: "image/png" });
+      const form = new FormData();
+      form.append("asset", styleFile);
+      form.append("nodeId", node.id);
+
+      const response = await fetch("/api/node/upload-style-collage", {
+        method: "POST",
+        body: form
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not compile STYLE.png.");
+
+      pushUndoSnapshot();
+      updateNode(node.id, {
+        activated: true,
+        locked: true,
+        resultUrl: data.asset.localUrl,
+        fileName: data.asset.fileName,
+        storedFileName: data.asset.storedFileName,
+        mimeType: data.asset.mimeType,
+        hiddenPrompt: stylePromptSuffix,
+        status: "ready",
+        error: ""
+      });
+    } catch (error) {
+      updateNode(node.id, { status: "error", error: error.message });
+    } finally {
+      setCompilingStyleNodeId(null);
+    }
+  }
+
+  function unlockStyleNode(nodeId) {
+    pushUndoSnapshot();
+    updateNode(nodeId, {
+      activated: false,
+      locked: false,
+      resultUrl: "",
+      fileName: "",
+      status: "ready",
+      error: ""
+    });
+    setEdges((current) => current.filter((edge) => edge.from.nodeId !== nodeId));
+  }
+
   function startNodeDrag(event, node) {
     if (event.target.closest("input, textarea, select, button, label")) return;
     event.stopPropagation();
@@ -520,6 +651,13 @@ export default function NodeEditor() {
       };
 
       if (to.nodeId !== draftEdge.from.nodeId) {
+        if (!canCreateEdge(draftEdge.from, to)) {
+          setSaveStatus("Style output connects to image prompts after locking");
+          setDraftEdge(null);
+          stopNodeDrag();
+          return;
+        }
+
         pushUndoSnapshot();
         setEdges((current) => [
           ...current.filter((edge) => !(edge.from.nodeId === draftEdge.from.nodeId && edge.from.port === draftEdge.from.port && edge.to.nodeId === to.nodeId && edge.to.port === to.port)),
@@ -535,6 +673,17 @@ export default function NodeEditor() {
 
     setDraftEdge(null);
     stopNodeDrag();
+  }
+
+  function canCreateEdge(from, to) {
+    const source = nodes.find((node) => node.id === from.nodeId);
+    const target = nodes.find((node) => node.id === to.nodeId);
+
+    if (source?.type === "style") {
+      return Boolean(source.data.activated && source.data.resultUrl && target?.type === "imageModel" && to.port === "imagePromptIn");
+    }
+
+    return true;
   }
 
   function getPortPoint(nodeId, port) {
@@ -696,13 +845,15 @@ export default function NodeEditor() {
     if (node.type !== "imageModel" && node.type !== "videoModel") return;
 
     const incoming = incomingByNode[node.id] || {};
-    const prompt = connectedText(incoming.promptIn) || node.data.prompt;
+    const basePrompt = connectedText(incoming.promptIn) || node.data.prompt;
 
     try {
       setRunningNodeId(node.id);
       updateNode(node.id, { status: "running", error: "" });
 
       if (node.type === "imageModel") {
+        const imagePromptItems = connectedImagePromptItems(incoming.imagePromptIn);
+        const prompt = appendStyleInstructions(basePrompt, incoming.imagePromptIn);
         const response = await fetch("/api/node/generate-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -711,7 +862,8 @@ export default function NodeEditor() {
             model: node.data.model,
             aspectRatio: node.data.aspectRatio,
             resolution: node.data.resolution,
-            imagePromptUrls: connectedAssetUrls(incoming.imagePromptIn),
+            imagePromptUrls: imagePromptItems.map((item) => item.url),
+            imagePromptLabels: imagePromptItems.map((item) => item.label),
             projectId,
             projectName,
             nodeId: node.id,
@@ -729,6 +881,7 @@ export default function NodeEditor() {
         return;
       }
 
+      const prompt = basePrompt;
       const response = await fetch("/api/node/generate-video", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -863,7 +1016,12 @@ export default function NodeEditor() {
               incoming={incomingByNode[node.id] || {}}
               onRun={runNode}
               onUpload={uploadMediaAsset}
+              onStyleImagesUpload={uploadStyleImages}
+              onStyleImageRemove={removeStyleImage}
+              onStyleActivate={activateStyleNode}
+              onStyleUnlock={unlockStyleNode}
               running={runningNodeId === node.id}
+              styleCompiling={compilingStyleNodeId === node.id}
               selected={selectedNodeSet.has(node.id)}
             />
           ))}
@@ -894,7 +1052,25 @@ function SelectionMarquee({ start, current }) {
   );
 }
 
-function NodeCard({ node, onDragStart, onRemove, onUpdate, onConnectStart, onDisconnectInput, connectedPortKeys, incoming, onRun, onUpload, running, selected }) {
+function NodeCard({
+  node,
+  onDragStart,
+  onRemove,
+  onUpdate,
+  onConnectStart,
+  onDisconnectInput,
+  connectedPortKeys,
+  incoming,
+  onRun,
+  onUpload,
+  onStyleImagesUpload,
+  onStyleImageRemove,
+  onStyleActivate,
+  onStyleUnlock,
+  running,
+  styleCompiling,
+  selected
+}) {
   const config = getNodeConfig(node.type);
   const Icon = config.icon;
 
@@ -925,6 +1101,11 @@ function NodeCard({ node, onDragStart, onRemove, onUpdate, onConnectStart, onDis
         onDisconnectInput={onDisconnectInput}
         connectedPortKeys={connectedPortKeys}
         onUpload={onUpload}
+        onStyleImagesUpload={onStyleImagesUpload}
+        onStyleImageRemove={onStyleImageRemove}
+        onStyleActivate={onStyleActivate}
+        onStyleUnlock={onStyleUnlock}
+        styleCompiling={styleCompiling}
       />
     </article>
   );
@@ -1003,6 +1184,32 @@ function MediaPreview({ node }) {
   );
 }
 
+function StyleCollage({ images, locked, onRemove }) {
+  if (!images.length) {
+    return (
+      <div className="style-collage empty">
+        <Palette size={24} />
+        <span>No style images yet</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`style-collage count-${images.length} ${locked ? "locked" : ""}`}>
+      {images.map((image) => (
+        <div className="style-collage-cell" key={image.id}>
+          <img src={image.localUrl} alt={image.fileName || "Style reference"} />
+          {!locked && (
+            <button onClick={() => onRemove(image.id)} title="Remove image">
+              <X size={12} />
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function UploadIcon({ type }) {
   if (type === "image") return <FileImage size={22} />;
   if (type === "video") return <Video size={22} />;
@@ -1010,7 +1217,22 @@ function UploadIcon({ type }) {
   return <Plus size={22} />;
 }
 
-function NodeBody({ node, onUpdate, incoming, onRun, running, onConnectStart, onDisconnectInput, connectedPortKeys, onUpload }) {
+function NodeBody({
+  node,
+  onUpdate,
+  incoming,
+  onRun,
+  running,
+  onConnectStart,
+  onDisconnectInput,
+  connectedPortKeys,
+  onUpload,
+  onStyleImagesUpload,
+  onStyleImageRemove,
+  onStyleActivate,
+  onStyleUnlock,
+  styleCompiling
+}) {
   const config = getNodeConfig(node.type);
   const outputPort = config.output[0];
 
@@ -1033,6 +1255,46 @@ function NodeBody({ node, onUpdate, incoming, onRun, running, onConnectStart, on
           <span>{node.data.resultUrl ? "Replace upload" : "Upload"}</span>
           <input type="file" accept={mediaAccept(node.type)} onChange={(event) => onUpload(node, event.target.files?.[0])} />
         </label>
+        {node.data.fileName && <small>{node.data.fileName}</small>}
+        {node.data.status === "uploading" && <small className="upload-status">Uploading...</small>}
+        {node.data.error && <small className="upload-error">{node.data.error}</small>}
+      </div>
+    );
+  }
+
+  if (node.type === "style") {
+    const styleImages = Array.isArray(node.data.styleImages) ? node.data.styleImages : [];
+    const canAddImages = !node.data.locked && styleImages.length < maxStyleImages;
+    return (
+      <div className="node-body style-node-body">
+        {node.data.activated && node.data.resultUrl ? (
+          <OutputPortRow node={node} port={outputPort} label="STYLE.png" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
+        ) : (
+          <div className="style-output-placeholder">Lock style to enable output</div>
+        )}
+
+        <StyleCollage images={styleImages} locked={node.data.locked} onRemove={(imageId) => onStyleImageRemove(node.id, imageId)} />
+
+        <div className="style-actions">
+          <label className={`style-upload-button ${!canAddImages ? "disabled" : ""}`}>
+            <FileImage size={16} />
+            <span>{styleImages.length ? "Add images" : "Upload images"}</span>
+            <input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={!canAddImages} onChange={(event) => onStyleImagesUpload(node, event.target.files)} />
+          </label>
+          <button
+            className={`style-lock-button ${node.data.locked ? "locked" : ""}`}
+            onClick={() => (node.data.locked ? onStyleUnlock(node.id) : onStyleActivate(node))}
+            disabled={styleCompiling || (!node.data.locked && !styleImages.length)}
+            title={node.data.locked ? "Unlock style" : "Compile STYLE.png"}
+          >
+            {node.data.locked ? <Lock size={16} /> : <Unlock size={16} />}
+          </button>
+        </div>
+
+        <div className="style-meta">
+          <span>{styleImages.length}/{maxStyleImages}</span>
+          <span>{styleCompiling ? "Compiling..." : node.data.locked ? "Locked" : "Editable"}</span>
+        </div>
         {node.data.fileName && <small>{node.data.fileName}</small>}
         {node.data.status === "uploading" && <small className="upload-status">Uploading...</small>}
         {node.data.error && <small className="upload-error">{node.data.error}</small>}
@@ -1203,6 +1465,11 @@ function getNodeConfig(type) {
       input: [],
       output: [{ id: "imageOut", label: "Image", color: portColors.image }]
     },
+    style: {
+      icon: Palette,
+      input: [],
+      output: [{ id: "styleOut", label: "STYLE.png", color: portColors.image }]
+    },
     video: {
       icon: Video,
       input: [],
@@ -1243,6 +1510,15 @@ function createDefaultNodeData(type, label, count) {
 
   if (type === "text") return { title, text: "" };
   if (type === "image" || type === "video" || type === "audio") return { title };
+  if (type === "style") {
+    return {
+      title,
+      styleImages: [],
+      activated: false,
+      locked: false,
+      hiddenPrompt: stylePromptSuffix
+    };
+  }
   if (type === "imageModel") {
     return {
       title,
@@ -1306,6 +1582,27 @@ function connectedAssetUrls(items = []) {
   return items.map(({ source }) => source.data.resultUrl).filter(Boolean);
 }
 
+function connectedImagePromptItems(items = []) {
+  return items
+    .map(({ source }) => {
+      if (!source.data.resultUrl) return null;
+      return {
+        url: source.data.resultUrl,
+        label: source.type === "style" ? "STYLE.png" : sourceLabel(source)
+      };
+    })
+    .filter(Boolean);
+}
+
+function appendStyleInstructions(prompt, items = []) {
+  const styleInstructions = items
+    .map(({ source }) => (source.type === "style" && source.data.activated && source.data.resultUrl ? source.data.hiddenPrompt || stylePromptSuffix : ""))
+    .filter(Boolean);
+
+  if (!styleInstructions.length) return prompt;
+  return [prompt, ...styleInstructions].filter(Boolean).join("\n\n");
+}
+
 function connectedSummary(items = [], fallback) {
   if (!items.length) return fallback;
   if (items.length === 1) return sourceLabel(items[0].source);
@@ -1313,9 +1610,75 @@ function connectedSummary(items = [], fallback) {
 }
 
 function sourceLabel(source) {
+  if (source.type === "style" && source.data.resultUrl) return "STYLE.png";
   if (source.data.resultUrl) return source.data.resultUrl.split("/").pop();
   if (source.data.fileName) return source.data.fileName;
   return source.data.title || source.type;
+}
+
+async function createStyleCollageBlob(images) {
+  const loadedImages = await Promise.all(images.map((image) => loadCanvasImage(image.localUrl)));
+  const columns = loadedImages.length === 1 ? 1 : loadedImages.length <= 4 ? 2 : 3;
+  const rows = Math.ceil(loadedImages.length / columns);
+  const cellSize = 512;
+  const gap = 18;
+  const canvas = document.createElement("canvas");
+  canvas.width = columns * cellSize;
+  canvas.height = rows * cellSize;
+
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#0d0d0d";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  loadedImages.forEach((image, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    const x = column * cellSize + gap / 2;
+    const y = row * cellSize + gap / 2;
+    const size = cellSize - gap;
+    drawImageCover(context, image, x, y, size, size);
+    context.strokeStyle = "rgba(255, 255, 255, 0.16)";
+    context.lineWidth = 2;
+    context.strokeRect(x, y, size, size);
+  });
+
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("Could not create STYLE.png."));
+      }
+    }, "image/png");
+  });
+}
+
+function loadCanvasImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not load one of the style images."));
+    image.src = src;
+  });
+}
+
+function drawImageCover(context, image, x, y, width, height) {
+  const sourceRatio = image.naturalWidth / image.naturalHeight;
+  const targetRatio = width / height;
+  let sourceWidth = image.naturalWidth;
+  let sourceHeight = image.naturalHeight;
+  let sourceX = 0;
+  let sourceY = 0;
+
+  if (sourceRatio > targetRatio) {
+    sourceWidth = image.naturalHeight * targetRatio;
+    sourceX = (image.naturalWidth - sourceWidth) / 2;
+  } else {
+    sourceHeight = image.naturalWidth / targetRatio;
+    sourceY = (image.naturalHeight - sourceHeight) / 2;
+  }
+
+  context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height);
 }
 
 function normalizeRect(start, current) {
@@ -1343,7 +1706,7 @@ function cloneGraphState(state) {
 function cloneNode(node) {
   return {
     ...node,
-    data: { ...node.data }
+    data: JSON.parse(JSON.stringify(node.data || {}))
   };
 }
 
