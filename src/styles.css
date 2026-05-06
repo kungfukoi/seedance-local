@@ -44,6 +44,29 @@ button {
   padding: 24px 0 56px;
 }
 
+.app-shell.nodes-mode {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  padding: 16px 0 0;
+}
+
+.app-shell.nodes-mode .topbar {
+  flex: 0 0 auto;
+  padding: 0 16px 16px;
+}
+
+.node-panel {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.node-panel[hidden] {
+  display: none;
+}
+
 .topbar {
   display: flex;
   align-items: center;

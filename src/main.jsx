@@ -230,7 +230,7 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${workspaceMode === "nodes" ? "nodes-mode" : ""}`}>
       <div className="topbar">
         <div className="mode-switch" aria-label="Workspace mode">
           <button className={workspaceMode === "composer" ? "active" : ""} onClick={() => setWorkspaceMode("composer")}>
@@ -249,7 +249,7 @@ function App() {
         </div>
       </div>
 
-      {workspaceMode === "composer" ? (
+      {workspaceMode === "composer" && (
         <>
           <section className="studio">
             <div className="composer">
@@ -377,9 +377,13 @@ function App() {
 
           <Gallery history={history} onRemove={removeHistoryItem} />
         </>
-      ) : workspaceMode === "nodes" ? (
-        <NodeEditor />
-      ) : (
+      )}
+
+      <div className="node-panel" hidden={workspaceMode !== "nodes"}>
+        <NodeEditor active={workspaceMode === "nodes"} />
+      </div>
+
+      {workspaceMode === "stats" && (
         <StatsDashboard />
       )}
     </main>

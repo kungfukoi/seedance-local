@@ -87,11 +87,12 @@ const initialEdges = [
   { id: "edge-2", from: { nodeId: "image-1", port: "imageOut" }, to: { nodeId: "image-model-1", port: "imagePromptIn" }, color: portColors.image }
 ];
 
-const sceneSize = 3200;
+const sceneMin = -50000;
+const sceneSize = 100000;
 const minZoom = 0.35;
 const maxZoom = 1.9;
 
-export default function NodeEditor() {
+export default function NodeEditor({ active = true }) {
   const canvasRef = React.useRef(null);
   const projectMenuRef = React.useRef(null);
   const undoStackRef = React.useRef([]);
@@ -107,6 +108,7 @@ export default function NodeEditor() {
   const [projectId, setProjectId] = React.useState(null);
   const [projects, setProjects] = React.useState([]);
   const [projectMenuOpen, setProjectMenuOpen] = React.useState(false);
+  const [canvasMenu, setCanvasMenu] = React.useState(null);
   const [toolbarCollapsed, setToolbarCollapsed] = React.useState(false);
   const [saveStatus, setSaveStatus] = React.useState("");
   const [runningNodeId, setRunningNodeId] = React.useState(null);
@@ -117,25 +119,36 @@ export default function NodeEditor() {
   const selectedProjectName = projects.find((project) => project.id === projectId)?.name;
 
   React.useLayoutEffect(() => {
+    if (!active) return;
     updatePortPositions();
-  }, [nodes, viewport]);
+  }, [nodes, viewport, active]);
 
   React.useEffect(() => {
     loadProjects();
   }, []);
 
   React.useEffect(() => {
+    if (!active) return;
+
     const handleResize = () => updatePortPositions();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [viewport]);
+  }, [viewport, active]);
 
   React.useEffect(() => {
+    if (!active) return;
+
     function handleKeyDown(event) {
       if (event.target.closest?.("input, textarea, select")) return;
 
       const commandKey = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
+
+      if (event.key === "Escape") {
+        setCanvasMenu(null);
+        setProjectMenuOpen(false);
+        return;
+      }
 
       if (commandKey && key === "z") {
         event.preventDefault();
@@ -164,20 +177,28 @@ export default function NodeEditor() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNodeIds, nodes, edges, viewport]);
+  }, [selectedNodeIds, nodes, edges, viewport, active]);
 
   React.useEffect(() => {
+    if (!active) return;
+
     function handlePointerDown(event) {
       if (!projectMenuRef.current?.contains(event.target)) {
         setProjectMenuOpen(false);
+      }
+
+      if (!event.target.closest?.(".canvas-context-menu")) {
+        setCanvasMenu(null);
       }
     }
 
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
-  }, []);
+  }, [active]);
 
   React.useEffect(() => {
+    if (!active) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -187,9 +208,11 @@ export default function NodeEditor() {
 
     canvas.addEventListener("wheel", handleWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", handleWheel);
-  }, []);
+  }, [active]);
 
   React.useEffect(() => {
+    if (!active) return;
+
     function blockPagePinchOutsideCanvas(event) {
       if (!event.ctrlKey && !event.metaKey) return;
 
@@ -216,7 +239,15 @@ export default function NodeEditor() {
       window.removeEventListener("gesturestart", blockBrowserGestureOutsideCanvas, { capture: true });
       window.removeEventListener("gesturechange", blockBrowserGestureOutsideCanvas, { capture: true });
     };
-  }, []);
+  }, [active]);
+
+  React.useEffect(() => {
+    if (active) return;
+    setDragState(null);
+    setDraftEdge(null);
+    setProjectMenuOpen(false);
+    setCanvasMenu(null);
+  }, [active]);
 
   function updatePortPositions() {
     const canvas = canvasRef.current;
@@ -234,7 +265,7 @@ export default function NodeEditor() {
     setPortPositions(nextPositions);
   }
 
-  function addNode(type) {
+  function addNode(type, position) {
     const count = nodes.filter((node) => node.type === type).length + 1;
     const spec = nodeCatalog.find((item) => item.type === type);
     pushUndoSnapshot();
@@ -243,11 +274,18 @@ export default function NodeEditor() {
       {
         id: `${type}-${Date.now()}`,
         type,
-        x: 180 + count * 28,
-        y: 160 + count * 24,
+        x: position?.x ?? 180 + count * 28,
+        y: position?.y ?? 160 + count * 24,
         data: createDefaultNodeData(type, spec?.label || "Node", count)
       }
     ]);
+  }
+
+  function addNodeFromCanvasMenu(type) {
+    if (!canvasMenu) return;
+    addNode(type, canvasMenu.scenePoint);
+    setSelectedNodeIds([]);
+    setCanvasMenu(null);
   }
 
   function removeNode(nodeId) {
@@ -342,6 +380,17 @@ export default function NodeEditor() {
   function handlePointerMove(event) {
     const pointer = screenToScene(event.clientX, event.clientY);
 
+    if (dragState?.type === "canvas-pan") {
+      const deltaX = event.clientX - dragState.startClient.x;
+      const deltaY = event.clientY - dragState.startClient.y;
+      setViewport({
+        ...dragState.startViewport,
+        x: dragState.startViewport.x + deltaX,
+        y: dragState.startViewport.y + deltaY
+      });
+      return;
+    }
+
     if (dragState?.type === "nodes") {
       const deltaX = pointer.x - dragState.startPointer.x;
       const deltaY = pointer.y - dragState.startPointer.y;
@@ -352,8 +401,8 @@ export default function NodeEditor() {
           return start
             ? {
                 ...node,
-                x: Math.max(20, start.x + deltaX),
-                y: Math.max(20, start.y + deltaY)
+                x: start.x + deltaX,
+                y: start.y + deltaY
               }
             : node;
         })
@@ -396,6 +445,7 @@ export default function NodeEditor() {
 
   function startCanvasPointerDown(event) {
     if (event.target !== event.currentTarget && !event.target.classList.contains("node-scene")) return;
+    setCanvasMenu(null);
     const pointer = screenToScene(event.clientX, event.clientY);
 
     if (event.shiftKey) {
@@ -411,6 +461,33 @@ export default function NodeEditor() {
     }
 
     setSelectedNodeIds([]);
+    if (event.button !== 0 && event.button !== 1) return;
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragState({
+      type: "canvas-pan",
+      startClient: {
+        x: event.clientX,
+        y: event.clientY
+      },
+      startViewport: viewport
+    });
+  }
+
+  function openCanvasMenu(event) {
+    if (!canvasRef.current) return;
+    if (event.target.closest(".node-card, .canvas-context-menu")) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const canvasRect = canvasRef.current.getBoundingClientRect();
+    setCanvasMenu({
+      left: event.clientX - canvasRect.left,
+      top: event.clientY - canvasRect.top,
+      scenePoint: screenToScene(event.clientX, event.clientY)
+    });
   }
 
   function startConnection(event, nodeId, port, color) {
@@ -826,11 +903,12 @@ export default function NodeEditor() {
 
       <div
         ref={canvasRef}
-        className="node-canvas"
+        className={`node-canvas ${dragState?.type === "canvas-pan" ? "panning" : ""}`}
         onPointerDown={startCanvasPointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishConnection}
         onPointerCancel={stopNodeDrag}
+        onContextMenu={openCanvasMenu}
       >
         <div
           className="node-scene"
@@ -840,7 +918,16 @@ export default function NodeEditor() {
             transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`
           }}
         >
-          <svg className="edge-layer" viewBox={`0 0 ${sceneSize} ${sceneSize}`}>
+          <svg
+            className="edge-layer"
+            viewBox={`${sceneMin} ${sceneMin} ${sceneSize} ${sceneSize}`}
+            style={{
+              left: `${sceneMin}px`,
+              top: `${sceneMin}px`,
+              width: `${sceneSize}px`,
+              height: `${sceneSize}px`
+            }}
+          >
             {edges.map((edge) => {
               const from = getPortPoint(edge.from.nodeId, edge.from.port);
               const to = getPortPoint(edge.to.nodeId, edge.to.port);
@@ -868,6 +955,25 @@ export default function NodeEditor() {
             />
           ))}
         </div>
+        {canvasMenu && (
+          <div
+            className="canvas-context-menu"
+            style={{
+              left: `${canvasMenu.left}px`,
+              top: `${canvasMenu.top}px`
+            }}
+          >
+            {nodeCatalog.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button key={item.type} onClick={() => addNodeFromCanvasMenu(item.type)} title={`Add ${item.label}`}>
+                  <Icon size={16} />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="zoom-readout">{Math.round(viewport.scale * 100)}%</div>
       </div>
     </section>
