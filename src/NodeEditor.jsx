@@ -178,7 +178,7 @@ export default function NodeEditor() {
   const [projects, setProjects] = React.useState([]);
   const [projectMenuOpen, setProjectMenuOpen] = React.useState(false);
   const [contextMenu, setContextMenu] = React.useState(null);
-  const [toolbarCollapsed, setToolbarCollapsed] = React.useState(false);
+  const [toolbarCollapsed, setToolbarCollapsed] = React.useState(true);
   const [saveStatus, setSaveStatus] = React.useState("");
   const [runningNodeId, setRunningNodeId] = React.useState(null);
   const [compilingStyleNodeId, setCompilingStyleNodeId] = React.useState(null);
@@ -221,10 +221,16 @@ export default function NodeEditor() {
 
   React.useEffect(() => {
     function handleKeyDown(event) {
-      if (event.target.closest?.("input, textarea, select")) return;
-
       const commandKey = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
+
+      if (commandKey && key === "s") {
+        event.preventDefault();
+        saveProject();
+        return;
+      }
+
+      if (event.target.closest?.("input, textarea, select")) return;
 
       if (commandKey && key === "z") {
         event.preventDefault();
@@ -253,7 +259,7 @@ export default function NodeEditor() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNodeIds, nodes, edges, viewport]);
+  }, [selectedNodeIds, nodes, edges, viewport, projectId, projectName]);
 
   React.useEffect(() => {
     function handlePointerDown(event) {
