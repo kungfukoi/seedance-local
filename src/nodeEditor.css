@@ -235,6 +235,37 @@
   text-align: center;
 }
 
+.node-context-menu {
+  position: absolute;
+  z-index: 30;
+  display: grid;
+  gap: 4px;
+  width: 178px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: #171717;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.4);
+}
+
+.node-context-menu button {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 7px;
+  color: rgba(244, 240, 232, 0.78);
+  background: transparent;
+  text-align: left;
+}
+
+.node-context-menu button:hover {
+  color: #f4f0e8;
+  background: rgba(221, 198, 49, 0.12);
+}
+
 .node-card {
   position: absolute;
   z-index: 2;
@@ -264,6 +295,12 @@
 
 .node-card.videoModel {
   width: 370px;
+}
+
+.node-card.preview {
+  width: calc(330px * var(--preview-scale, 1));
+  min-width: 330px;
+  max-width: 990px;
 }
 
 .node-title {
@@ -417,6 +454,11 @@
 
 .media-node-body > .media-upload-card:hover {
   background: rgba(221, 198, 49, 0.12);
+}
+
+.media-node-body:focus-within {
+  outline: 1px solid rgba(221, 198, 49, 0.14);
+  outline-offset: -4px;
 }
 
 .media-node-body input {
@@ -619,6 +661,55 @@
 
 .style-node-body .upload-error {
   color: #f3a288;
+}
+
+.preview-node-body {
+  position: relative;
+  padding: 10px 18px 18px;
+}
+
+.preview-node-body .node-row {
+  grid-template-columns: 88px 1fr;
+}
+
+.preview-stage {
+  display: grid;
+  overflow: hidden;
+  min-height: 186px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+  color: rgba(244, 240, 232, 0.42);
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.preview-stage.has-preview {
+  min-height: 0;
+}
+
+.preview-stage img,
+.preview-stage video {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 720px;
+  object-fit: contain;
+  background: #000;
+}
+
+.preview-resize-handle {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-right: 2px solid rgba(221, 198, 49, 0.72);
+  border-bottom: 2px solid rgba(221, 198, 49, 0.72);
+  border-radius: 0 0 5px;
+  background: transparent;
+  cursor: nwse-resize;
 }
 
 .model-node-body {

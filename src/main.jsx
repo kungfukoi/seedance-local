@@ -69,7 +69,7 @@ function App() {
   async function refreshHistory() {
     try {
       const response = await fetch("/api/history");
-      setHistory(await response.json());
+      setHistory((await response.json()).filter(isComposerVideoHistory));
     } catch {
       setHistory([]);
     }
@@ -222,7 +222,7 @@ function App() {
         throw new Error(data.error || "Could not remove this generation.");
       }
 
-      setHistory(data);
+      setHistory(data.filter(isComposerVideoHistory));
       setMessage("Removed from Recent generations.");
     } catch (error) {
       setMessage(error.message);
@@ -585,6 +585,10 @@ function Gallery({ history, onRemove }) {
       </div>
     </section>
   );
+}
+
+function isComposerVideoHistory(item) {
+  return item?.mediaType === "video" && item?.project?.id === "composer" && Boolean(item?.localVideo);
 }
 
 createRoot(document.getElementById("root")).render(<App />);

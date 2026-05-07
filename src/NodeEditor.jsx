@@ -4,6 +4,7 @@ import {
   FileAudio,
   FileImage,
   Film,
+  MonitorPlay,
   ImagePlus,
   Lock,
   PanelLeftClose,
@@ -25,6 +26,7 @@ const nodeCatalog = [
   { type: "style", label: "Style", icon: Palette },
   { type: "video", label: "Video", icon: Video },
   { type: "audio", label: "Audio", icon: FileAudio },
+  { type: "preview", label: "Preview", icon: MonitorPlay },
   { type: "imageModel", label: "Image Model", icon: ImagePlus },
   { type: "videoModel", label: "Video Model", icon: Film }
 ];
@@ -153,23 +155,27 @@ const initialEdges = [
 const sceneSize = 3200;
 const minZoom = 0.35;
 const maxZoom = 1.9;
+const nodeDraftStorageKey = "seedance-node-editor-draft-v1";
+const previewBaseWidth = 330;
 
 export default function NodeEditor() {
   const canvasRef = React.useRef(null);
   const projectMenuRef = React.useRef(null);
   const undoStackRef = React.useRef([]);
   const clipboardRef = React.useRef(null);
-  const [nodes, setNodes] = React.useState(initialNodes);
-  const [edges, setEdges] = React.useState(initialEdges);
+  const savedDraft = React.useMemo(loadNodeEditorDraft, []);
+  const [nodes, setNodes] = React.useState(savedDraft.nodes);
+  const [edges, setEdges] = React.useState(savedDraft.edges);
   const [dragState, setDragState] = React.useState(null);
   const [draftEdge, setDraftEdge] = React.useState(null);
   const [portPositions, setPortPositions] = React.useState({});
-  const [viewport, setViewport] = React.useState({ x: 0, y: 0, scale: 1 });
+  const [viewport, setViewport] = React.useState(savedDraft.viewport);
   const [selectedNodeIds, setSelectedNodeIds] = React.useState([]);
-  const [projectName, setProjectName] = React.useState("Untitled node project");
-  const [projectId, setProjectId] = React.useState(null);
+  const [projectName, setProjectName] = React.useState(savedDraft.projectName);
+  const [projectId, setProjectId] = React.useState(savedDraft.projectId);
   const [projects, setProjects] = React.useState([]);
   const [projectMenuOpen, setProjectMenuOpen] = React.useState(false);
+  const [contextMenu, setContextMenu] = React.useState(null);
   const [toolbarCollapsed, setToolbarCollapsed] = React.useState(false);
   const [saveStatus, setSaveStatus] = React.useState("");
   const [runningNodeId, setRunningNodeId] = React.useState(null);
@@ -187,6 +193,23 @@ export default function NodeEditor() {
   React.useEffect(() => {
     loadProjects();
   }, []);
+
+  React.useEffect(() => {
+    try {
+      localStorage.setItem(
+        nodeDraftStorageKey,
+        JSON.stringify({
+          nodes,
+          edges,
+          viewport,
+          projectId,
+          projectName
+        })
+      );
+    } catch {
+      // Local persistence should never interrupt the node editor.
+    }
+  }, [nodes, edges, viewport, projectId, projectName]);
 
   React.useEffect(() => {
     const handleResize = () => updatePortPositions();
@@ -234,6 +257,9 @@ export default function NodeEditor() {
     function handlePointerDown(event) {
       if (!projectMenuRef.current?.contains(event.target)) {
         setProjectMenuOpen(false);
+      }
+      if (!event.target.closest?.(".node-context-menu")) {
+        setContextMenu(null);
       }
     }
 
@@ -298,7 +324,7 @@ export default function NodeEditor() {
     setPortPositions(nextPositions);
   }
 
-  function addNode(type) {
+  function addNode(type, position) {
     const count = nodes.filter((node) => node.type === type).length + 1;
     const spec = nodeCatalog.find((item) => item.type === type);
     pushUndoSnapshot();
@@ -307,11 +333,12 @@ export default function NodeEditor() {
       {
         id: `${type}-${Date.now()}`,
         type,
-        x: 180 + count * 28,
-        y: 160 + count * 24,
+        x: position?.x ?? 180 + count * 28,
+        y: position?.y ?? 160 + count * 24,
         data: createDefaultNodeData(type, spec?.label || "Node", count)
       }
     ]);
+    setContextMenu(null);
   }
 
   function removeNode(nodeId) {
@@ -450,6 +477,20 @@ export default function NodeEditor() {
     setEdges((current) => current.filter((edge) => edge.from.nodeId !== nodeId));
   }
 
+  function startPreviewResize(event, node) {
+    event.preventDefault();
+    event.stopPropagation();
+    pushUndoSnapshot();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const pointer = screenToScene(event.clientX, event.clientY);
+    setDragState({
+      type: "previewResize",
+      nodeId: node.id,
+      startPointer: pointer,
+      startScale: Number(node.data.previewScale || 1)
+    });
+  }
+
   async function activateStyleNode(node) {
     const styleImages = Array.isArray(node.data.styleImages) ? node.data.styleImages.filter((image) => image.localUrl) : [];
     if (!styleImages.length) {
@@ -506,7 +547,7 @@ export default function NodeEditor() {
   }
 
   function startNodeDrag(event, node) {
-    if (event.target.closest("input, textarea, select, button, label")) return;
+    if (event.target.closest("input, textarea, select, button, label, .preview-resize-handle")) return;
     event.stopPropagation();
     const selectedIds = selectNodeForDrag(node.id, event.shiftKey);
     pushUndoSnapshot();
@@ -555,6 +596,13 @@ export default function NodeEditor() {
       setSelectedNodeIds([...new Set([...dragState.baseSelection, ...selected])]);
     }
 
+    if (dragState?.type === "previewResize") {
+      const deltaX = pointer.x - dragState.startPointer.x;
+      const deltaY = pointer.y - dragState.startPointer.y;
+      const nextScale = clamp(dragState.startScale + Math.max(deltaX, deltaY) / previewBaseWidth, 1, 3);
+      updateNode(dragState.nodeId, { previewScale: roundPreviewScale(nextScale) });
+    }
+
     if (draftEdge) {
       setDraftEdge((current) => ({
         ...current,
@@ -582,6 +630,7 @@ export default function NodeEditor() {
 
   function startCanvasPointerDown(event) {
     if (event.target !== event.currentTarget && !event.target.classList.contains("node-scene")) return;
+    setContextMenu(null);
     const pointer = screenToScene(event.clientX, event.clientY);
 
     if (event.shiftKey) {
@@ -597,6 +646,19 @@ export default function NodeEditor() {
     }
 
     setSelectedNodeIds([]);
+  }
+
+  function openCanvasContextMenu(event) {
+    if (event.target.closest("[data-node-card-id]")) return;
+    event.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    setContextMenu({
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+      scene: screenToScene(event.clientX, event.clientY)
+    });
   }
 
   function startConnection(event, nodeId, port, color) {
@@ -735,7 +797,12 @@ export default function NodeEditor() {
     const target = nodes.find((node) => node.id === to.nodeId);
 
     if (source?.type === "style") {
-      return Boolean(source.data.activated && source.data.resultUrl && target?.type === "imageModel" && to.port === "imagePromptIn");
+      if (!source.data.activated || !source.data.resultUrl) return false;
+      return Boolean((target?.type === "imageModel" && to.port === "imagePromptIn") || (target?.type === "preview" && to.port === "sourceIn"));
+    }
+
+    if (target?.type === "preview") {
+      return ["image", "video", "imageModel", "videoModel"].includes(source?.type);
     }
 
     return true;
@@ -1039,6 +1106,7 @@ export default function NodeEditor() {
         onPointerMove={handlePointerMove}
         onPointerUp={finishConnection}
         onPointerCancel={stopNodeDrag}
+        onContextMenu={openCanvasContextMenu}
       >
         <div
           className="node-scene"
@@ -1075,12 +1143,26 @@ export default function NodeEditor() {
               onStyleImageRemove={removeStyleImage}
               onStyleActivate={activateStyleNode}
               onStyleUnlock={unlockStyleNode}
+              onPreviewResizeStart={startPreviewResize}
               running={runningNodeId === node.id}
               styleCompiling={compilingStyleNodeId === node.id}
               selected={selectedNodeSet.has(node.id)}
             />
           ))}
         </div>
+        {contextMenu && (
+          <div className="node-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+            {nodeCatalog.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button key={item.type} onClick={() => addNode(item.type, contextMenu.scene)}>
+                  <Icon size={15} />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="zoom-readout">{Math.round(viewport.scale * 100)}%</div>
       </div>
     </section>
@@ -1122,6 +1204,7 @@ function NodeCard({
   onStyleImageRemove,
   onStyleActivate,
   onStyleUnlock,
+  onPreviewResizeStart,
   running,
   styleCompiling,
   selected
@@ -1132,7 +1215,7 @@ function NodeCard({
   return (
     <article
       className={`node-card ${node.type} ${selected ? "selected" : ""}`}
-      style={{ transform: `translate(${node.x}px, ${node.y}px)` }}
+      style={{ transform: `translate(${node.x}px, ${node.y}px)`, "--preview-scale": node.data.previewScale || 1 }}
       data-node-card-id={node.id}
       onPointerDown={(event) => onDragStart(event, node)}
     >
@@ -1160,6 +1243,7 @@ function NodeCard({
         onStyleImageRemove={onStyleImageRemove}
         onStyleActivate={onStyleActivate}
         onStyleUnlock={onStyleUnlock}
+        onPreviewResizeStart={onPreviewResizeStart}
         styleCompiling={styleCompiling}
       />
     </article>
@@ -1239,18 +1323,24 @@ function MediaPreview({ node }) {
   );
 }
 
-function StyleCollage({ images, locked, onRemove }) {
+function StyleCollage({ images, locked, onRemove, onDropImages }) {
+  function handleDrop(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    onDropImages?.(event.dataTransfer.files);
+  }
+
   if (!images.length) {
     return (
-      <div className="style-collage empty">
+      <div className="style-collage empty" onDragOver={allowFileDrop} onDrop={handleDrop}>
         <Palette size={24} />
-        <span>No style images yet</span>
+        <span>Drop style images here</span>
       </div>
     );
   }
 
   return (
-    <div className={`style-collage count-${images.length} ${locked ? "locked" : ""}`}>
+    <div className={`style-collage count-${images.length} ${locked ? "locked" : ""}`} onDragOver={allowFileDrop} onDrop={handleDrop}>
       {images.map((image) => (
         <div className="style-collage-cell" key={image.id}>
           <img src={image.localUrl} alt={image.fileName || "Style reference"} />
@@ -1286,6 +1376,7 @@ function NodeBody({
   onStyleImageRemove,
   onStyleActivate,
   onStyleUnlock,
+  onPreviewResizeStart,
   styleCompiling
 }) {
   const config = getNodeConfig(node.type);
@@ -1302,7 +1393,16 @@ function NodeBody({
 
   if (node.type === "image" || node.type === "video" || node.type === "audio") {
     return (
-      <div className="node-body media-node-body">
+      <div
+        className="node-body media-node-body"
+        onDragOver={allowFileDrop}
+        onDrop={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const file = firstAcceptedFile(event.dataTransfer.files, node.type);
+          if (file) onUpload(node, file);
+        }}
+      >
         <OutputPortRow node={node} port={outputPort} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />
         <MediaPreview node={node} />
         <label className="media-upload-card">
@@ -1328,7 +1428,12 @@ function NodeBody({
           <div className="style-output-placeholder">Lock style to enable output</div>
         )}
 
-        <StyleCollage images={styleImages} locked={node.data.locked} onRemove={(imageId) => onStyleImageRemove(node.id, imageId)} />
+        <StyleCollage
+          images={styleImages}
+          locked={node.data.locked}
+          onRemove={(imageId) => onStyleImageRemove(node.id, imageId)}
+          onDropImages={(files) => onStyleImagesUpload(node, files)}
+        />
 
         <div className="style-preset-row">
           <span>Style</span>
@@ -1386,6 +1491,24 @@ function NodeBody({
         {node.data.fileName && <small>{node.data.fileName}</small>}
         {node.data.status === "uploading" && <small className="upload-status">Uploading...</small>}
         {node.data.error && <small className="upload-error">{node.data.error}</small>}
+      </div>
+    );
+  }
+
+  if (node.type === "preview") {
+    const previewSource = connectedPreviewSource(incoming.sourceIn);
+    const sourcePort = config.input.find((port) => port.id === "sourceIn");
+    return (
+      <div className="node-body preview-node-body">
+        <NodeRow label="Source" inputPort={sourcePort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+          <button className={previewSource ? "connected-field" : ""}>{previewSource ? previewSource.label : "Connect image or video"}</button>
+        </NodeRow>
+        <div className={`preview-stage ${previewSource ? "has-preview" : ""}`}>
+          {previewSource?.type === "image" && <img src={previewSource.url} alt={previewSource.label} />}
+          {previewSource?.type === "video" && <video src={previewSource.url} controls />}
+          {!previewSource && <span>Preview will appear here</span>}
+        </div>
+        <button className="preview-resize-handle" onPointerDown={(event) => onPreviewResizeStart(event, node)} title="Resize preview" />
       </div>
     );
   }
@@ -1576,6 +1699,11 @@ function getNodeConfig(type) {
       input: [],
       output: [{ id: "audioOut", label: "Audio", color: portColors.audio }]
     },
+    preview: {
+      icon: MonitorPlay,
+      input: [{ id: "sourceIn", label: "Source", color: portColors.image }],
+      output: []
+    },
     imageModel: {
       icon: ImagePlus,
       input: [
@@ -1606,6 +1734,7 @@ function createDefaultNodeData(type, label, count) {
 
   if (type === "text") return { title, text: "" };
   if (type === "image" || type === "video" || type === "audio") return { title };
+  if (type === "preview") return { title, previewScale: 1 };
   if (type === "style") {
     return {
       title,
@@ -1646,6 +1775,19 @@ function mediaAccept(type) {
   return "audio/mpeg,audio/wav,audio/mp4";
 }
 
+function allowFileDrop(event) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function firstAcceptedFile(fileList, type) {
+  const files = Array.from(fileList || []);
+  if (type === "image") return files.find((file) => file.type.startsWith("image/"));
+  if (type === "video") return files.find((file) => file.type.startsWith("video/"));
+  if (type === "audio") return files.find((file) => file.type.startsWith("audio/"));
+  return files[0];
+}
+
 function buildIncomingByNode(nodes, edges) {
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
   return edges.reduce((incoming, edge) => {
@@ -1680,6 +1822,23 @@ function connectedText(items = []) {
 
 function connectedAssetUrls(items = []) {
   return items.map(({ source }) => source.data.resultUrl).filter(Boolean);
+}
+
+function connectedPreviewSource(items = []) {
+  const source = items.filter(({ source: item }) => item.data.resultUrl).at(-1)?.source;
+  if (!source) return null;
+
+  return {
+    url: source.data.resultUrl,
+    type: previewMediaType(source),
+    label: sourceLabel(source)
+  };
+}
+
+function previewMediaType(source) {
+  if (source.type === "video" || source.type === "videoModel") return "video";
+  if (/\.(mp4|mov|webm)$/i.test(source.data.resultUrl || "")) return "video";
+  return "image";
 }
 
 function connectedImagePromptItems(items = []) {
@@ -1843,6 +2002,34 @@ function cloneEdge(edge) {
     from: { ...edge.from },
     to: { ...edge.to }
   };
+}
+
+function loadNodeEditorDraft() {
+  const fallback = {
+    nodes: initialNodes,
+    edges: initialEdges,
+    viewport: { x: 0, y: 0, scale: 1 },
+    projectId: null,
+    projectName: "Untitled node project"
+  };
+
+  try {
+    const parsed = JSON.parse(localStorage.getItem(nodeDraftStorageKey) || "null");
+    if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return fallback;
+    return {
+      nodes: parsed.nodes,
+      edges: parsed.edges,
+      viewport: parsed.viewport || fallback.viewport,
+      projectId: parsed.projectId || null,
+      projectName: parsed.projectName || fallback.projectName
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function roundPreviewScale(value) {
+  return Math.round(value * 100) / 100;
 }
 
 function clamp(value, min, max) {
