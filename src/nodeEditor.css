@@ -673,21 +673,8 @@
   padding: 12px 18px 18px;
 }
 
-.style-only-node-body.disabled {
-  opacity: 0.68;
-}
-
 .style-only-node-body .style-preset-row {
   grid-template-columns: 54px 1fr;
-}
-
-.style-only-node-body select:disabled {
-  cursor: not-allowed;
-}
-
-.style-disabled-note {
-  color: rgba(244, 240, 232, 0.46);
-  font-size: 12px;
 }
 
 .preview-node-body {
@@ -840,26 +827,14 @@
   display: grid;
   gap: 7px;
   margin: -2px 0 12px 146px;
+  min-height: 28px;
+  align-items: center;
 }
 
 .effective-prompt-preview span {
   color: rgba(221, 198, 49, 0.66);
   font-size: 11px;
   font-weight: 780;
-}
-
-.effective-prompt-preview textarea {
-  width: 100%;
-  min-height: 142px;
-  padding: 9px;
-  border: 1px solid rgba(221, 198, 49, 0.2);
-  border-radius: 7px;
-  outline: 0;
-  color: rgba(244, 240, 232, 0.74);
-  background: rgba(221, 198, 49, 0.08);
-  font-size: 12px;
-  line-height: 1.38;
-  resize: vertical;
 }
 
 .node-row option {

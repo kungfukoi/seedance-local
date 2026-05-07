@@ -185,7 +185,6 @@ export default function NodeEditor() {
 
   const incomingByNode = React.useMemo(() => buildIncomingByNode(nodes, edges), [nodes, edges]);
   const connectedPortKeys = React.useMemo(() => buildConnectedPortKeys(edges), [edges]);
-  const directionStyleLockActive = React.useMemo(() => hasConnectedDirectionNode(nodes, edges), [nodes, edges]);
   const selectedNodeSet = React.useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   const selectedProjectName = projects.find((project) => project.id === projectId)?.name;
 
@@ -788,12 +787,11 @@ export default function NodeEditor() {
             (edge) => !(edge.from.nodeId === draftEdge.from.nodeId && edge.from.port === draftEdge.from.port && edge.to.nodeId === to.nodeId && edge.to.port === to.port)
           );
 
-          if (source?.type === "direction") {
-            nextEdges = nextEdges.filter((edge) => nodes.find((node) => node.id === edge.from.nodeId)?.type !== "style");
-          }
-
-          if (source?.type === "style" && targetNode?.type === "imageModel") {
-            nextEdges = nextEdges.filter((edge) => nodes.find((node) => node.id === edge.from.nodeId)?.type !== "direction");
+          if (source?.type === "direction" && targetNode?.type === "imageModel") {
+            nextEdges = nextEdges.filter((edge) => {
+              const edgeSource = nodes.find((node) => node.id === edge.from.nodeId);
+              return !(edge.to.nodeId === targetNode.id && edgeSource?.type === "style");
+            });
           }
 
           return [
@@ -830,9 +828,11 @@ export default function NodeEditor() {
     }
 
     if (source?.type === "style") {
-      if (directionStyleLockActive) return "Direction is connected, so Style nodes are disabled";
       if ((source.data.stylePreset || "None") === "None") return "Choose a Style preset before connecting";
-      if (target.type === "imageModel" && to.port === "styleIn") return "";
+      if (target.type === "imageModel" && to.port === "styleIn") {
+        if (imageModelHasDirectionConnection(nodes, edges, target.id)) return "This Image Model already has Direction connected";
+        return "";
+      }
       return "Style presets connect to the Image Model style input";
     }
 
@@ -1183,7 +1183,6 @@ export default function NodeEditor() {
               onPreviewResizeStart={startPreviewResize}
               running={runningNodeId === node.id}
               styleCompiling={compilingStyleNodeId === node.id}
-              directionStyleLockActive={directionStyleLockActive}
               selected={selectedNodeSet.has(node.id)}
             />
           ))}
@@ -1245,7 +1244,6 @@ function NodeCard({
   onPreviewResizeStart,
   running,
   styleCompiling,
-  directionStyleLockActive,
   selected
 }) {
   const config = getNodeConfig(node.type);
@@ -1284,7 +1282,6 @@ function NodeCard({
         onStyleUnlock={onStyleUnlock}
         onPreviewResizeStart={onPreviewResizeStart}
         styleCompiling={styleCompiling}
-        directionStyleLockActive={directionStyleLockActive}
       />
     </article>
   );
@@ -1417,8 +1414,7 @@ function NodeBody({
   onStyleActivate,
   onStyleUnlock,
   onPreviewResizeStart,
-  styleCompiling,
-  directionStyleLockActive
+  styleCompiling
 }) {
   const config = getNodeConfig(node.type);
   const outputPort = config.output[0];
@@ -1541,10 +1537,8 @@ function NodeBody({
     const styleSelected = selectedPreset !== "None";
 
     return (
-      <div className={`node-body style-only-node-body ${directionStyleLockActive ? "disabled" : ""}`}>
-        {directionStyleLockActive ? (
-          <div className="style-output-placeholder">Direction connected</div>
-        ) : styleSelected ? (
+      <div className="node-body style-only-node-body">
+        {styleSelected ? (
           <OutputPortRow
             node={node}
             port={outputPort}
@@ -1559,14 +1553,12 @@ function NodeBody({
 
         <div className="style-preset-row">
           <span>Style</span>
-          <select disabled={directionStyleLockActive} value={selectedPreset} onChange={(event) => onUpdate(node.id, { stylePreset: event.target.value })}>
+          <select value={selectedPreset} onChange={(event) => onUpdate(node.id, { stylePreset: event.target.value })}>
             {stylePresetNames.map((presetName) => (
               <option key={presetName}>{presetName}</option>
             ))}
           </select>
         </div>
-
-        {directionStyleLockActive && <small className="style-disabled-note">Disabled while Direction is connected.</small>}
       </div>
     );
   }
@@ -1616,8 +1608,7 @@ function NodeBody({
         </NodeRow>
         {promptHasGeneratedAdditions && (
           <div className="effective-prompt-preview">
-            <span>Effective prompt sent to image model</span>
-            <textarea readOnly value={effectivePromptValue} />
+            <span>Direction/style preset instructions applied</span>
           </div>
         )}
         <details open>
@@ -1897,9 +1888,9 @@ function buildConnectedPortKeys(edges) {
   return keys;
 }
 
-function hasConnectedDirectionNode(nodes, edges) {
+function imageModelHasDirectionConnection(nodes, edges, imageModelId) {
   const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-  return edges.some((edge) => nodeMap.get(edge.from.nodeId)?.type === "direction");
+  return edges.some((edge) => edge.to.nodeId === imageModelId && nodeMap.get(edge.from.nodeId)?.type === "direction");
 }
 
 function connectedText(items = []) {
