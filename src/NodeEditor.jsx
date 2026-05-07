@@ -39,6 +39,32 @@ const portColors = {
 const maxStyleImages = 6;
 const stylePromptSuffix =
   "Only use the uploaded collage reference images labeled STYLE.png as a style reference for the color grading, grain style, and camera qualities. The generated image should NOT take content from the collage reference image labeled STYLE.png directly, only use the collage references as a style transfer guide.";
+const stylePresetPrompts = {
+  None: "",
+  Cinematic:
+    "High-end cinematic still frame, shot on ARRI Alexa 35, high quality prime lens, high dynamic range, shallow depth of field, atmospheric cinematography, high production value, feature film look.",
+  Storyboard:
+    "Hand-drawn digital storyboard, line drawing with minimalistic shading, grayscale shading, cinematic composition, production-planning style, loose but intentional drawing, simple tonal blocking, clear visual storytelling. A black and white line drawing. No color. No pencil or charcoal sketches.",
+  Commercial:
+    "Polished commercial image, premium advertising style, clean composition, bright refined lighting, shallow depth of field, elevated brand look, modern campaign aesthetic, crisp details, visually appealing.",
+  Anime:
+    "Stylized anime illustration, clean linework, expressive design, cinematic art lighting, vibrant controlled color palette, detailed background art, dynamic framing, polished animated look, emotionally engaging atmosphere.",
+  Claymation:
+    "Handmade claymation style, stop-motion look, sculpted clay characters, environment, and props, tactile surfaces, visible handmade imperfections, miniature set design, soft lighting, charming handcrafted aesthetic.",
+  "2D Animation":
+    "Clean 2D animation style, bold graphic shapes, smooth color blocking, expressive poses, simplified forms, clear silhouettes, modern animated design, playful and readable composition.",
+  "3D Animation":
+    "Stylized 3D animation look, polished modeling, soft global illumination, appealing textures, expressive forms, cinematic framing, animated feature quality, clean rendering, vibrant and dimensional.",
+  "Dark as Fuk":
+    "Haunting atmospheric style, eerie stillness, very disturbing and unsettling mood, quiet tension, ghostly lighting, muted colors, shadows, liminal spaces, subtle surreal details, lonely composition, restrained horror tone, dreamlike unease, beautiful but disturbing visual atmosphere.",
+  "Pop as Fuk":
+    "Poppy fun style, bright bold colors, playful composition, energetic, upbeat mood, glossy visual polish, cheerful, vibrant contrast, whimsical details, modern campaign-ready look, colorful and instantly engaging, super poppy music video vibes.",
+  "Sexy as Fuk":
+    "High-fashion edgy style, natural, anatomy allure, elegant sensuality, bare skin, bare anatomy, minimal, sculptural, flattering dramatic lighting, skin highlights, premium fashion photography, magnetic presence, sophisticated mood, form and shape, soft skin texture, risky high fashion, edgy.",
+  "Strange as Fuk":
+    "Strange surreal style, offbeat visual logic, unexpected shapes, odd proportions, unusual textures, dreamlike atmosphere, slightly unsettling but playful tone, surreal composition, imaginative art direction, weird in a smart and intentional way, strange morphs, unexpected abstract realism."
+};
+const stylePresetNames = Object.keys(stylePresetPrompts);
 
 const initialNodes = [
   {
@@ -1275,6 +1301,15 @@ function NodeBody({
 
         <StyleCollage images={styleImages} locked={node.data.locked} onRemove={(imageId) => onStyleImageRemove(node.id, imageId)} />
 
+        <div className="style-preset-row">
+          <span>Preset</span>
+          <select value={node.data.stylePreset || "None"} onChange={(event) => onUpdate(node.id, { stylePreset: event.target.value })}>
+            {stylePresetNames.map((presetName) => (
+              <option key={presetName}>{presetName}</option>
+            ))}
+          </select>
+        </div>
+
         <div className="style-actions">
           <label className={`style-upload-button ${!canAddImages ? "disabled" : ""}`}>
             <FileImage size={16} />
@@ -1522,6 +1557,7 @@ function createDefaultNodeData(type, label, count) {
     return {
       title,
       styleImages: [],
+      stylePreset: "None",
       activated: false,
       locked: false,
       hiddenPrompt: stylePromptSuffix
@@ -1604,7 +1640,7 @@ function connectedImagePromptItems(items = []) {
 
 function buildEffectiveImagePrompt(prompt, items = [], aspectRatio) {
   const styleInstructions = items
-    .map(({ source }) => (source.type === "style" && source.data.activated && source.data.resultUrl ? source.data.hiddenPrompt || stylePromptSuffix : ""))
+    .flatMap(({ source }) => stylePromptPiecesForSource(source))
     .filter(Boolean);
 
   if (!styleInstructions.length) return prompt;
@@ -1615,6 +1651,13 @@ function buildEffectiveImagePrompt(prompt, items = [], aspectRatio) {
     : "";
 
   return [prompt, ...styleInstructions, aspectInstruction].filter(Boolean).join("\n\n");
+}
+
+function stylePromptPiecesForSource(source) {
+  if (source.type !== "style" || !source.data.activated || !source.data.resultUrl) return [];
+
+  const selectedPreset = source.data.stylePreset || "None";
+  return [source.data.hiddenPrompt || stylePromptSuffix, stylePresetPrompts[selectedPreset] || ""].filter(Boolean);
 }
 
 function connectedSummary(items = [], fallback) {
