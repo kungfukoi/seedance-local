@@ -65,6 +65,35 @@ const stylePresetPrompts = {
     "Strange surreal style, offbeat visual logic, unexpected shapes, odd proportions, unusual textures, dreamlike atmosphere, slightly unsettling but playful tone, surreal composition, imaginative art direction, weird in a smart and intentional way, strange morphs, unexpected abstract realism."
 };
 const stylePresetNames = Object.keys(stylePresetPrompts);
+const shotPresetPrompts = {
+  None: "",
+  CU: "A close up shot.",
+  MS: "A medium shot.",
+  WS: "A wide shot.",
+  ECU: "An extreme close up shot.",
+  EWS: "An extreme wide shot."
+};
+const lensPresetPrompts = {
+  None: "",
+  "18mm": "Shot on a wide 18mm prime lens.",
+  "35mm": "Shot on a wide 35mm prime lens.",
+  "50mm": "Shot on a 50mm prime lens.",
+  "85mm": "Shot on a long 85mm prime lens.",
+  "120mm": "Shot on a long 120mm prime lens.",
+  Macro: "Shot on a macro probe lens."
+};
+const typePresetPrompts = {
+  None: "",
+  "Low Angle": "A low angle shot.",
+  "High Angle": "A high angle shot.",
+  "Extreme High": "A bird's eye view from extremely high angled shot.",
+  "Extreme Low": "A worm's eye view from extremely low angled shot.",
+  Portrait: "A portrait shot.",
+  Profile: "A profile shot."
+};
+const shotPresetNames = Object.keys(shotPresetPrompts);
+const lensPresetNames = Object.keys(lensPresetPrompts);
+const typePresetNames = Object.keys(typePresetPrompts);
 
 const initialNodes = [
   {
@@ -1302,9 +1331,33 @@ function NodeBody({
         <StyleCollage images={styleImages} locked={node.data.locked} onRemove={(imageId) => onStyleImageRemove(node.id, imageId)} />
 
         <div className="style-preset-row">
-          <span>Preset</span>
+          <span>Style</span>
           <select value={node.data.stylePreset || "None"} onChange={(event) => onUpdate(node.id, { stylePreset: event.target.value })}>
             {stylePresetNames.map((presetName) => (
+              <option key={presetName}>{presetName}</option>
+            ))}
+          </select>
+        </div>
+        <div className="style-preset-row">
+          <span>Shot</span>
+          <select value={node.data.shotPreset || "None"} onChange={(event) => onUpdate(node.id, { shotPreset: event.target.value })}>
+            {shotPresetNames.map((presetName) => (
+              <option key={presetName}>{presetName}</option>
+            ))}
+          </select>
+        </div>
+        <div className="style-preset-row">
+          <span>Lens</span>
+          <select value={node.data.lensPreset || "None"} onChange={(event) => onUpdate(node.id, { lensPreset: event.target.value })}>
+            {lensPresetNames.map((presetName) => (
+              <option key={presetName}>{presetName}</option>
+            ))}
+          </select>
+        </div>
+        <div className="style-preset-row">
+          <span>Type</span>
+          <select value={node.data.typePreset || "None"} onChange={(event) => onUpdate(node.id, { typePreset: event.target.value })}>
+            {typePresetNames.map((presetName) => (
               <option key={presetName}>{presetName}</option>
             ))}
           </select>
@@ -1558,6 +1611,9 @@ function createDefaultNodeData(type, label, count) {
       title,
       styleImages: [],
       stylePreset: "None",
+      shotPreset: "None",
+      lensPreset: "None",
+      typePreset: "None",
       activated: false,
       locked: false,
       hiddenPrompt: stylePromptSuffix
@@ -1657,7 +1713,17 @@ function stylePromptPiecesForSource(source) {
   if (source.type !== "style" || !source.data.activated || !source.data.resultUrl) return [];
 
   const selectedPreset = source.data.stylePreset || "None";
-  return [source.data.hiddenPrompt || stylePromptSuffix, stylePresetPrompts[selectedPreset] || ""].filter(Boolean);
+  const selectedShot = source.data.shotPreset || "None";
+  const selectedLens = source.data.lensPreset || "None";
+  const selectedType = source.data.typePreset || "None";
+
+  return [
+    source.data.hiddenPrompt || stylePromptSuffix,
+    stylePresetPrompts[selectedPreset] || "",
+    shotPresetPrompts[selectedShot] || "",
+    lensPresetPrompts[selectedLens] || "",
+    typePresetPrompts[selectedType] || ""
+  ].filter(Boolean);
 }
 
 function connectedSummary(items = [], fallback) {
