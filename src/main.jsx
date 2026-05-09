@@ -30,7 +30,6 @@ const imageResolutions = ["2K", "1K", "4K"];
 
 function App() {
   const promptRef = React.useRef(null);
-  const imagePromptRef = React.useRef(null);
   const [prompt, setPrompt] = React.useState("");
   const [startFrame, setStartFrame] = React.useState(null);
   const [endFrame, setEndFrame] = React.useState(null);
@@ -49,7 +48,6 @@ function App() {
   const [imagePrompt, setImagePrompt] = React.useState("");
   const [imageModel, setImageModel] = React.useState("Nano Banana Pro");
   const [imageReferences, setImageReferences] = React.useState([]);
-  const [imageMentionState, setImageMentionState] = React.useState({ open: false, query: "", start: 0 });
   const [imageResolution, setImageResolution] = React.useState("2K");
   const [imageAspectRatio, setImageAspectRatio] = React.useState("21:9");
   const [imageStatus, setImageStatus] = React.useState("idle");
@@ -176,7 +174,6 @@ function App() {
           aspectRatio: imageAspectRatio,
           resolution: imageResolution,
           imagePromptUrls: uploadedReferences.map((reference) => reference.localUrl),
-          imagePromptLabels: imageReferences.map((reference) => reference.name),
           projectId: "image",
           projectName: "Image",
           nodeId: "image-tab",
@@ -217,15 +214,10 @@ function App() {
 
   function addImageReferences(files) {
     setImageReferences((current) => {
-      const usedNames = new Set(current.map((reference) => reference.name.toLowerCase()));
-      const incoming = Array.from(files).map((file, index) => {
-        const name = uniqueReferenceName(suggestReferenceName(file, current.length + index + 1), usedNames);
-        return {
-          id: crypto.randomUUID(),
-          file,
-          name
-        };
-      });
+      const incoming = Array.from(files).map((file) => ({
+        id: crypto.randomUUID(),
+        file
+      }));
 
       return [...current, ...incoming].slice(0, 9);
     });
@@ -252,33 +244,8 @@ function App() {
     );
   }
 
-  function updateImageReferenceName(id, value) {
-    setImageReferences((current) =>
-      current.map((reference) =>
-        reference.id === id
-          ? {
-              ...reference,
-              name: cleanReferenceName(value)
-            }
-          : reference
-      )
-    );
-  }
-
   function normalizeReferenceName(id) {
     setReferences((current) => {
-      const usedNames = new Set();
-      return current.map((reference, index) => {
-        const fallback = `Image${index + 1}`;
-        const baseName = reference.id === id && !reference.name ? fallback : reference.name || fallback;
-        const name = uniqueReferenceName(baseName, usedNames);
-        return { ...reference, name };
-      });
-    });
-  }
-
-  function normalizeImageReferenceName(id) {
-    setImageReferences((current) => {
       const usedNames = new Set();
       return current.map((reference, index) => {
         const fallback = `Image${index + 1}`;
@@ -296,17 +263,11 @@ function App() {
   }
 
   function handleImagePromptChange(event) {
-    const nextPrompt = event.target.value;
-    setImagePrompt(nextPrompt);
-    updateImageMentionState(nextPrompt, event.target.selectionStart);
+    setImagePrompt(event.target.value);
   }
 
   function handlePromptCursor(event) {
     updateMentionState(event.target.value, event.target.selectionStart);
-  }
-
-  function handleImagePromptCursor(event) {
-    updateImageMentionState(event.target.value, event.target.selectionStart);
   }
 
   function updateMentionState(text, cursor) {
@@ -319,22 +280,6 @@ function App() {
     }
 
     setMentionState({
-      open: true,
-      query: match[2],
-      start: cursor - match[2].length - 1
-    });
-  }
-
-  function updateImageMentionState(text, cursor) {
-    const beforeCursor = text.slice(0, cursor);
-    const match = beforeCursor.match(/(^|\s)@([A-Za-z0-9_-]*)$/);
-
-    if (!match || !imageReferences.length) {
-      setImageMentionState({ open: false, query: "", start: cursor });
-      return;
-    }
-
-    setImageMentionState({
       open: true,
       query: match[2],
       start: cursor - match[2].length - 1
@@ -354,22 +299,6 @@ function App() {
     requestAnimationFrame(() => {
       promptRef.current?.focus();
       promptRef.current?.setSelectionRange(nextCursor, nextCursor);
-    });
-  }
-
-  function insertImageReferenceMention(name) {
-    const textarea = imagePromptRef.current;
-    const cursor = textarea?.selectionStart ?? imagePrompt.length;
-    const start = imageMentionState.open ? imageMentionState.start : cursor;
-    const nextPrompt = `${imagePrompt.slice(0, start)}@${name} ${imagePrompt.slice(cursor)}`;
-    const nextCursor = start + name.length + 2;
-
-    setImagePrompt(nextPrompt);
-    setImageMentionState({ open: false, query: "", start: nextCursor });
-
-    requestAnimationFrame(() => {
-      imagePromptRef.current?.focus();
-      imagePromptRef.current?.setSelectionRange(nextCursor, nextCursor);
     });
   }
 
@@ -423,14 +352,11 @@ function App() {
             <div className="composer">
               {imageReferences.length > 0 && (
                 <div className="drop-row">
-                  {imageReferences.map((file, index) => (
-                    <ReferenceThumb
-                      key={file.id}
-                      reference={file}
-                      index={index}
-                      onInsert={insertImageReferenceMention}
-                      onRename={updateImageReferenceName}
-                      onRenameComplete={normalizeImageReferenceName}
+                  {imageReferences.map((reference, index) => (
+                    <Thumb
+                      key={reference.id}
+                      file={reference.file}
+                      label={`Reference image ${index + 1}`}
                       onRemove={() => removeImageReference(index)}
                     />
                   ))}
@@ -442,23 +368,11 @@ function App() {
               )}
 
               <textarea
-                ref={imagePromptRef}
                 value={imagePrompt}
                 onChange={handleImagePromptChange}
-                onKeyUp={handleImagePromptCursor}
-                onClick={handleImagePromptCursor}
-                onFocus={handleImagePromptCursor}
-                placeholder="Describe your image, use @ to reference named images, or guide the visual style"
+                placeholder="Describe your image or guide the visual style"
                 spellCheck="true"
               />
-
-              {imageMentionState.open && (
-                <MentionMenu
-                  query={imageMentionState.query}
-                  references={imageReferences}
-                  onSelect={insertImageReferenceMention}
-                />
-              )}
 
               <div className="control-row">
                 <SelectChip icon={<Wand2 size={17} />} value={imageModel} options={imageModels} onChange={setImageModel} />
