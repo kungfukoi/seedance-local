@@ -1,6 +1,6 @@
-# Seedance Local
+# NewtNode
 
-A local browser app for generating Seedance 2.0 videos through Fal.ai while keeping your API key on your machine.
+A local browser app for generating images and Seedance 2.0 videos through API providers while keeping your keys on your machine.
 
 ## Setup
 
@@ -33,7 +33,7 @@ A local browser app for generating Seedance 2.0 videos through Fal.ai while keep
 
 ## One-Click Launch
 
-Double-click `VS_AI.app` in this folder to start the local backend, start the Vite UI, and open the app in a standalone browser window. `VS_AI.command` does the same thing with terminal logs visible.
+Double-click `VS_AI.app` in this folder to start the local backend, start the Vite UI, and open NewtNode in a standalone browser window. `VS_AI.command` does the same thing with terminal logs visible. The launcher filenames are kept for compatibility with existing local shortcuts.
 
 ## How Routing Works
 

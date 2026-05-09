@@ -5,9 +5,9 @@
   <key>CFBundleExecutable</key>
   <string>VS_AI</string>
   <key>CFBundleIdentifier</key>
-  <string>local.seedance.vsai</string>
+  <string>local.newtnode.app</string>
   <key>CFBundleName</key>
-  <string>VS_AI</string>
+  <string>NewtNode</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

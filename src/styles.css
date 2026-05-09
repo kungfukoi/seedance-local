@@ -48,7 +48,25 @@ button {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 16px;
+  gap: 14px;
+}
+
+.brand-lockup {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 38px;
+}
+
+.brand-lockup img {
+  display: block;
+  width: clamp(176px, 23vw, 270px);
+  height: 38px;
+  border: 1px solid rgba(221, 198, 49, 0.18);
+  border-radius: 999px;
+  object-fit: cover;
+  object-position: left center;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.26);
 }
 
 .mode-switch {
@@ -1023,8 +1041,17 @@ textarea::placeholder {
   }
 
   .topbar {
-    align-items: flex-start;
+    align-items: stretch;
     flex-direction: column;
+    gap: 10px;
+  }
+
+  .brand-lockup {
+    width: 100%;
+  }
+
+  .brand-lockup img {
+    width: min(100%, 300px);
   }
 
   .mode-switch {

@@ -354,6 +354,9 @@ function App() {
   return (
     <main className="app-shell">
       <div className="topbar">
+        <div className="brand-lockup" aria-label="NewtNode">
+          <img src="/newtnode-logo.svg" alt="NewtNode" />
+        </div>
         <div className="mode-switch" aria-label="Workspace mode">
           <button className={workspaceMode === "image" ? "active" : ""} onClick={() => setWorkspaceMode("image")}>
             Image

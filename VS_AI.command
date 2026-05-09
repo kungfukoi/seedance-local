@@ -2,7 +2,7 @@
 set -e
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG_DIR="$ROOT_DIR/.vs_ai_logs"
+LOG_DIR="$ROOT_DIR/.newtnode_logs"
 URL="http://127.0.0.1:5173/"
 
 cd "$ROOT_DIR"

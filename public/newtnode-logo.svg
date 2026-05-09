@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 52" role="img" aria-labelledby="title">
+  <title id="title">NewtNode</title>
+  <defs>
+    <linearGradient id="newtGold" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#716f54"/>
+      <stop offset="0.36" stop-color="#e1c936"/>
+      <stop offset="0.62" stop-color="#f7dd30"/>
+      <stop offset="1" stop-color="#85816a"/>
+    </linearGradient>
+    <filter id="softGlow" x="-20%" y="-70%" width="140%" height="240%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="1 0 0 0 0.95 0 1 0 0 0.83 0 0 1 0 0.18 0 0 0 0.58 0"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="420" height="52" rx="15" fill="#151514"/>
+  <rect x="1" y="1" width="418" height="50" rx="14" fill="url(#newtGold)" opacity="0.94"/>
+  <g filter="url(#softGlow)" fill="none" stroke="#3b3514" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.72">
+    <path d="M28 29c9-10 24-17 45-21-7 7-13 15-18 25"/>
+    <path d="M52 32c11-20 37-29 70-24 10 2 16 7 16 14 0 9-11 14-28 14H78c-11 0-20-1-26-4Z"/>
+    <path d="M85 35c-9 10-20 14-35 12 7-5 13-10 19-17"/>
+    <path d="M100 37l-7 11m-12-11-10 10m39-12 9 9"/>
+    <path d="M112 17c6 0 9 3 9 7s-3 7-9 7-9-3-9-7 3-7 9-7Z"/>
+    <path d="M129 21h1"/>
+  </g>
+  <text x="157" y="36" font-family="Inter, Arial Black, Arial, sans-serif" font-size="34" font-weight="900" letter-spacing="-1" fill="#211d08" opacity="0.78">NewtNode</text>
+</svg>

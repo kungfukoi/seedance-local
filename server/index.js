@@ -645,7 +645,7 @@ app.post(
 );
 
 app.listen(port, "127.0.0.1", () => {
-  console.log(`Seedance Local server running on http://127.0.0.1:${port}`);
+  console.log(`NewtNode server running on http://127.0.0.1:${port}`);
 });
 
 function resolveRoute({ startFrame, references, speed }) {
