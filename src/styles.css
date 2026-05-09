@@ -56,17 +56,16 @@ button {
   flex: 0 0 auto;
   align-items: center;
   height: 38px;
+  overflow: hidden;
 }
 
 .brand-lockup img {
   display: block;
-  width: clamp(176px, 23vw, 270px);
   height: 38px;
-  border: 1px solid rgba(221, 198, 49, 0.18);
-  border-radius: 999px;
-  object-fit: cover;
+  width: auto;
+  max-width: min(32vw, 310px);
+  object-fit: contain;
   object-position: left center;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.26);
 }
 
 .mode-switch {
@@ -1051,7 +1050,7 @@ textarea::placeholder {
   }
 
   .brand-lockup img {
-    width: min(100%, 300px);
+    max-width: min(100%, 300px);
   }
 
   .mode-switch {
