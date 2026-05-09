@@ -470,6 +470,11 @@ textarea::placeholder {
   margin-top: 16px;
 }
 
+.result-stack {
+  display: grid;
+  gap: 14px;
+}
+
 .status-panel {
   display: flex;
   align-items: center;

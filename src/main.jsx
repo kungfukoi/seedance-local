@@ -27,6 +27,7 @@ const imageModels = ["Nano Banana Pro", "OpenAI Image 2"];
 const nanoImageAspectRatios = ["21:9", "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4"];
 const openAiImageAspectRatios = ["21:9", "16:9", "1:1", "9:16"];
 const imageResolutions = ["2K", "1K", "4K"];
+const batchOptions = ["1", "2", "3", "4"];
 
 function App() {
   const promptRef = React.useRef(null);
@@ -43,7 +44,8 @@ function App() {
   const [seed, setSeed] = React.useState("");
   const [status, setStatus] = React.useState("idle");
   const [message, setMessage] = React.useState("");
-  const [result, setResult] = React.useState(null);
+  const [result, setResult] = React.useState([]);
+  const [videoBatchCount, setVideoBatchCount] = React.useState("1");
   const [videoHistory, setVideoHistory] = React.useState([]);
   const [imagePrompt, setImagePrompt] = React.useState("");
   const [imageModel, setImageModel] = React.useState("Nano Banana Pro");
@@ -52,7 +54,8 @@ function App() {
   const [imageAspectRatio, setImageAspectRatio] = React.useState("21:9");
   const [imageStatus, setImageStatus] = React.useState("idle");
   const [imageMessage, setImageMessage] = React.useState("");
-  const [imageResult, setImageResult] = React.useState(null);
+  const [imageResult, setImageResult] = React.useState([]);
+  const [imageBatchCount, setImageBatchCount] = React.useState("1");
   const [imageHistory, setImageHistory] = React.useState([]);
   const [workspaceMode, setWorkspaceMode] = React.useState("image");
 
@@ -95,10 +98,28 @@ function App() {
       return;
     }
 
+    const count = Number(videoBatchCount);
     setStatus("generating");
-    setMessage("Preparing files and sending the Seedance request...");
-    setResult(null);
+    setMessage(`Starting ${formatBatchCount(count)}...`);
+    setResult([]);
 
+    try {
+      const runs = Array.from({ length: count }, (_, index) => runVideoGeneration(index));
+      const settled = await Promise.allSettled(runs);
+      const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+      const failures = settled.filter((item) => item.status === "rejected");
+
+      setResult(successes);
+      setStatus(successes.length ? "complete" : "error");
+      setMessage(batchStatusMessage("video", count, successes.length, failures));
+      await refreshHistory();
+    } catch (error) {
+      setStatus("error");
+      setMessage(error.message);
+    }
+  }
+
+  async function runVideoGeneration(index) {
     const form = new FormData();
     form.append("prompt", prompt.trim());
     form.append("resolution", resolution);
@@ -114,25 +135,17 @@ function App() {
       form.append("references", reference.file);
     }
 
-    try {
-      const response = await fetch("/api/generate", {
-        method: "POST",
-        body: form
-      });
-      const data = await response.json();
+    const response = await fetch("/api/generate", {
+      method: "POST",
+      body: form
+    });
+    const data = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data.error || "Generation failed.");
-      }
-
-      setResult(data);
-      setStatus("complete");
-      setMessage(`${data.mode} complete.`);
-      await refreshHistory();
-    } catch (error) {
-      setStatus("error");
-      setMessage(error.message);
+    if (!response.ok) {
+      throw new Error(`Run ${index + 1}: ${data.error || "Generation failed."}`);
     }
+
+    return data;
   }
 
   async function generateImage() {
@@ -141,9 +154,10 @@ function App() {
       return;
     }
 
+    const count = Number(imageBatchCount);
     setImageStatus("generating");
-    setImageMessage("Uploading references and sending the image request...");
-    setImageResult(null);
+    setImageMessage(`Uploading references and starting ${formatBatchCount(count)}...`);
+    setImageResult([]);
 
     try {
       const uploadedReferences = [];
@@ -163,37 +177,47 @@ function App() {
         uploadedReferences.push(uploadData.asset);
       }
 
-      const response = await fetch("/api/node/generate-image", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          prompt: imagePrompt.trim(),
-          model: imageModel,
-          aspectRatio: imageAspectRatio,
-          resolution: imageResolution,
-          imagePromptUrls: uploadedReferences.map((reference) => reference.localUrl),
-          projectId: "image",
-          projectName: "Image",
-          nodeId: "image-tab",
-          nodeTitle: "Image"
-        })
-      });
-      const data = await response.json();
+      const imagePromptUrls = uploadedReferences.map((reference) => reference.localUrl);
+      const runs = Array.from({ length: count }, (_, index) => runImageGeneration(index, imagePromptUrls));
+      const settled = await Promise.allSettled(runs);
+      const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+      const failures = settled.filter((item) => item.status === "rejected");
 
-      if (!response.ok) {
-        throw new Error(data.error || "Image generation failed.");
-      }
-
-      setImageResult(data);
-      setImageStatus("complete");
-      setImageMessage(`${imageModel} complete.`);
+      setImageResult(successes);
+      setImageStatus(successes.length ? "complete" : "error");
+      setImageMessage(batchStatusMessage("image", count, successes.length, failures));
       await refreshHistory();
     } catch (error) {
       setImageStatus("error");
       setImageMessage(error.message);
     }
+  }
+
+  async function runImageGeneration(index, imagePromptUrls) {
+    const response = await fetch("/api/node/generate-image", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        prompt: imagePrompt.trim(),
+        model: imageModel,
+        aspectRatio: imageAspectRatio,
+        resolution: imageResolution,
+        imagePromptUrls,
+        projectId: "image",
+        projectName: "Image",
+        nodeId: "image-tab",
+        nodeTitle: "Image"
+      })
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(`Run ${index + 1}: ${data.error || "Image generation failed."}`);
+    }
+
+    return data;
   }
 
   function addReferences(files) {
@@ -377,6 +401,8 @@ function App() {
               <div className="control-row">
                 <SelectChip icon={<Wand2 size={17} />} value={imageModel} options={imageModels} onChange={setImageModel} />
 
+                <SelectChip icon={<Sparkles size={16} />} value={imageBatchCount} options={batchOptions} onChange={setImageBatchCount} formatter={formatBatchCount} />
+
                 <ReferenceChip count={imageReferences.length} onSelect={addImageReferences} />
 
                 <SelectChip icon={<Maximize2 size={16} />} value={imageResolution} options={imageResolutions} onChange={setImageResolution} />
@@ -391,6 +417,7 @@ function App() {
 
             <div className="route-strip">
               <span>{imageModel}</span>
+              <span>{formatBatchCount(Number(imageBatchCount))}</span>
               <span>{imageResolution}</span>
               <span>{imageAspectRatio}</span>
               <span>{imageReferences.length ? `${imageReferences.length} ref${imageReferences.length === 1 ? "" : "s"}` : "Text"}</span>
@@ -398,13 +425,17 @@ function App() {
 
             <div className="result-zone">
               <StatusPanel status={imageStatus} message={imageMessage} />
-              {imageResult?.image?.localUrl && (
-                <div className="image-stage">
-                  <img src={imageResult.image.localUrl} alt="Generated image" />
-                  <div className="video-meta">
-                    <span>{imageModel}</span>
-                    <span>{formatCost(imageResult.cost)}</span>
-                  </div>
+              {imageResult.length > 0 && (
+                <div className="result-stack">
+                  {imageResult.map((item, index) => (
+                    <div className="image-stage" key={item.image?.localUrl || index}>
+                      <img src={item.image.localUrl} alt={`Generated image ${index + 1}`} />
+                      <div className="video-meta">
+                        <span>{imageResult.length > 1 ? `Image ${index + 1}` : imageModel}</span>
+                        <span>{formatCost(item.cost)}</span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -469,6 +500,8 @@ function App() {
               <div className="control-row">
                 <SelectChip icon={<Wand2 size={17} />} value={speed} options={speeds} onChange={setSpeed} formatter={(value) => (value === "fast" ? "Seedance 2.0 Fast" : "Seedance 2.0")} />
 
+                <SelectChip icon={<Sparkles size={16} />} value={videoBatchCount} options={batchOptions} onChange={setVideoBatchCount} formatter={formatBatchCount} />
+
                 <ReferenceChip count={references.length} onSelect={addReferences} />
 
                 <FileChip
@@ -518,6 +551,7 @@ function App() {
 
             <div className="route-strip">
               <span>{activeRoute}</span>
+              <span>{formatBatchCount(Number(videoBatchCount))}</span>
               <span>{resolution}</span>
               <span>{duration === "auto" ? "Auto" : `${duration}s`}</span>
               <span>{aspectRatio}</span>
@@ -526,13 +560,17 @@ function App() {
 
             <div className="result-zone">
               <StatusPanel status={status} message={message} />
-              {result?.video?.localUrl && (
-                <div className="video-stage">
-                  <video controls src={result.video.localUrl} />
-                  <div className="video-meta">
-                    <span>{result.mode}</span>
-                    <span>{result.seed ? `Seed ${result.seed}` : "Seed auto"}</span>
-                  </div>
+              {result.length > 0 && (
+                <div className="result-stack">
+                  {result.map((item, index) => (
+                    <div className="video-stage" key={item.video?.localUrl || index}>
+                      <video controls src={item.video.localUrl} />
+                      <div className="video-meta">
+                        <span>{result.length > 1 ? `Video ${index + 1}` : item.mode}</span>
+                        <span>{item.seed ? `Seed ${item.seed}` : "Seed auto"}</span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -766,6 +804,23 @@ function formatCost(cost) {
   const amount = Number(cost?.amountUsd);
   if (!Number.isFinite(amount) || amount <= 0) return "";
   return `$${amount.toFixed(amount >= 1 ? 2 : 4)}`;
+}
+
+function formatBatchCount(value) {
+  const count = Number(value) || 1;
+  return `${count} gen${count === 1 ? "" : "s"}`;
+}
+
+function batchStatusMessage(mediaType, total, completed, failures) {
+  const label = mediaType === "image" ? "image" : "video";
+  if (completed === total) return `${total} ${label} generation${total === 1 ? "" : "s"} complete.`;
+
+  const firstError = failures[0]?.reason?.message || "";
+  if (completed > 0) {
+    return `${completed} of ${total} ${label} generations complete.${firstError ? ` ${firstError}` : ""}`;
+  }
+
+  return firstError || `${label[0].toUpperCase()}${label.slice(1)} generation failed.`;
 }
 
 createRoot(document.getElementById("root")).render(<App />);
