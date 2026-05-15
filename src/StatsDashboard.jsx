@@ -12,8 +12,8 @@ import {
 
 const defaultPricing = {
   seedance: {
-    standardCostPerSecond: 0.3034,
-    fastCostPerSecond: 0.2419
+    standardCostPerSecond: 0.014,
+    fastCostPerSecond: 0.0112
   },
   nanoBananaPro: {
     cost1K2K: 0.134,
@@ -21,7 +21,18 @@ const defaultPricing = {
   },
   openAiImage2: {
     mediumCost: 0.053
+  },
+  textProcessing: {
+    falRequestCost: 0.001,
+    falVisionUnitCost: 0.01,
+    falVideoUnitCost: 0.01
   }
+};
+
+const mediaColors = {
+  text: "#f0c83b",
+  image: "#3d85ff",
+  video: "#58ce63"
 };
 
 export default function StatsDashboard() {
@@ -75,7 +86,7 @@ export default function StatsDashboard() {
 
       <div className="stats-metrics">
         <MetricCard icon={<DollarSign size={20} />} label="Estimated spend" value={formatCurrency(stats.totalCost)} detail={`${formatCurrency(stats.averageCost)} avg / run`} />
-        <MetricCard icon={<Activity size={20} />} label="Generations" value={stats.totalCount} detail={`${stats.videoCount} video, ${stats.imageCount} image`} />
+        <MetricCard icon={<Activity size={20} />} label="Generations" value={stats.totalCount} detail={`${stats.videoCount} video, ${stats.imageCount} image, ${stats.textCount} text`} />
         <MetricCard icon={<Film size={20} />} label="Video seconds" value={`${stats.videoSeconds}s`} detail={`${stats.fastCount} fast runs`} />
         <MetricCard icon={<Layers3 size={20} />} label="Top project" value={stats.topProject?.name || "None yet"} detail={stats.topProject ? `${formatCurrency(stats.topProject.cost)} tracked` : "Waiting for runs"} />
       </div>
@@ -93,7 +104,7 @@ export default function StatsDashboard() {
 
         <section className="stats-panel">
           <PanelTitle icon={<Image size={17} />} title="Media mix" aside={`${stats.totalCount} total`} />
-          <MediaSplit imageCount={stats.imageCount} videoCount={stats.videoCount} />
+          <MediaSplit imageCount={stats.imageCount} videoCount={stats.videoCount} textCount={stats.textCount} />
         </section>
 
         <section className="stats-panel">
@@ -113,7 +124,7 @@ export default function StatsDashboard() {
       </div>
 
       <p className="cost-note">
-        Costs are local estimates based on recorded settings and the app pricing constants. Confirm exact billing in fal.ai and Google Cloud.
+        Costs use each run's recorded cost when available, with fal pricing defaults for older runs. Confirm final billing in fal.ai, Google Cloud, and OpenAI dashboards.
       </p>
     </section>
   );
@@ -197,15 +208,26 @@ function VolumeBars({ days }) {
   );
 }
 
-function MediaSplit({ imageCount, videoCount }) {
-  const total = Math.max(1, imageCount + videoCount);
+function MediaSplit({ imageCount, videoCount, textCount }) {
+  const totalCount = imageCount + videoCount + textCount;
+  const total = Math.max(1, totalCount);
   const imagePercent = Math.round((imageCount / total) * 100);
   const videoPercent = Math.round((videoCount / total) * 100);
+  const imageStop = imagePercent;
+  const videoStop = imagePercent + videoPercent;
+  const dominant = [
+    { label: "image", count: imageCount },
+    { label: "video", count: videoCount },
+    { label: "text", count: textCount }
+  ].sort((a, b) => b.count - a.count)[0];
+  const donutBackground = totalCount
+    ? `conic-gradient(${mediaColors.image} 0 ${imageStop}%, ${mediaColors.video} ${imageStop}% ${videoStop}%, ${mediaColors.text} ${videoStop}% 100%)`
+    : "rgba(255, 255, 255, 0.08)";
 
   return (
     <div className="media-split">
-      <div className="media-donut" style={{ "--image-percent": `${imagePercent}%` }}>
-        <span>{imagePercent}%</span>
+      <div className="media-donut" style={{ background: donutBackground }}>
+        <span>{totalCount}</span>
       </div>
       <div className="media-legend">
         <span>
@@ -218,7 +240,12 @@ function MediaSplit({ imageCount, videoCount }) {
           Videos
           <strong>{videoCount}</strong>
         </span>
-        <small>{videoPercent}% video by count</small>
+        <span>
+          <i className="text-dot" />
+          Text
+          <strong>{textCount}</strong>
+        </span>
+        <small>{dominant.count ? `${dominant.label} leads by count` : "No runs yet"}</small>
       </div>
     </div>
   );
@@ -289,7 +316,7 @@ function buildUsageStats(history, pricing) {
     }
 
     addAggregate(modelMap, item.modelName, item);
-    addAggregate(projectMap, item.projectName, item);
+    addAggregate(projectMap, item.projectId, item, item.projectName);
   });
 
   days.forEach((day) => {
@@ -302,6 +329,7 @@ function buildUsageStats(history, pricing) {
   const totalCount = normalized.length;
   const videoCount = normalized.filter((item) => item.mediaType === "video").length;
   const imageCount = normalized.filter((item) => item.mediaType === "image").length;
+  const textCount = normalized.filter((item) => item.mediaType === "text").length;
   const videoSeconds = normalized.reduce((sum, item) => sum + (item.mediaType === "video" ? item.durationSeconds : 0), 0);
 
   return {
@@ -310,6 +338,7 @@ function buildUsageStats(history, pricing) {
     totalCount,
     imageCount,
     videoCount,
+    textCount,
     videoSeconds,
     fastCount: normalized.filter((item) => item.isFast).length,
     averageCost: totalCount ? round(totalCost / totalCount) : 0,
@@ -325,8 +354,9 @@ function normalizeUsageItem(item, pricing) {
   const mediaType = item.mediaType || (item.localImage ? "image" : "video");
   const settings = item.settings || {};
   const modelName = item.modelName || inferModelName(item, mediaType);
-  const projectName = item.project?.name || (mediaType === "image" ? "Image" : "Video");
-  const cost = Number(item.cost?.amountUsd ?? estimateItemCost(item, mediaType, pricing));
+  const projectId = item.project?.id || (mediaType === "image" ? "image" : mediaType === "text" ? "text" : "video");
+  const projectName = item.project?.name || (mediaType === "image" ? "Image" : mediaType === "text" ? "Text" : "Video");
+  const cost = resolvedItemCost(item, mediaType, pricing);
   const durationSeconds = mediaType === "video" ? durationToSeconds(settings.duration) : 0;
   const cutoff = startOfDay(new Date());
   cutoff.setDate(cutoff.getDate() - 29);
@@ -338,12 +368,23 @@ function normalizeUsageItem(item, pricing) {
     inWindow: date >= cutoff,
     mediaType,
     modelName,
+    projectId,
     projectName,
     prompt: item.prompt,
     cost: round(cost),
     durationSeconds,
     isFast: settings.speed === "fast" || String(item.endpoint || "").includes("/fast/")
   };
+}
+
+function resolvedItemCost(item, mediaType, pricing) {
+  const storedCost = Number(item.cost?.amountUsd);
+  const hasTrustedStoredCost = Number.isFinite(storedCost) && item.cost?.pricingSource;
+
+  if (hasTrustedStoredCost) return storedCost;
+  if (mediaType === "image" && Number.isFinite(storedCost)) return storedCost;
+
+  return estimateItemCost(item, mediaType, pricing);
 }
 
 function estimateItemCost(item, mediaType, pricing) {
@@ -359,6 +400,17 @@ function estimateItemCost(item, mediaType, pricing) {
       : pricing.nanoBananaPro.cost1K2K;
   }
 
+  if (mediaType === "text") {
+    const textPricing = pricing.textProcessing || defaultPricing.textProcessing;
+    if (String(item.provider || settings.provider || "").toLowerCase() !== "fal") return 0;
+
+    return (
+      textPricing.falRequestCost +
+      (Number(settings.imageInputCount || 0) > 0 ? textPricing.falVisionUnitCost : 0) +
+      (Number(settings.videoInputCount || 0) > 0 ? textPricing.falVideoUnitCost : 0)
+    );
+  }
+
   const isFast = settings.speed === "fast" || String(item.endpoint || "").includes("/fast/");
   const rate = isFast ? pricing.seedance.fastCostPerSecond : pricing.seedance.standardCostPerSecond;
   return durationToSeconds(settings.duration) * rate;
@@ -366,14 +418,15 @@ function estimateItemCost(item, mediaType, pricing) {
 
 function inferModelName(item, mediaType) {
   if (mediaType === "image") return "Nano Banana Pro";
+  if (mediaType === "text") return item.settings?.model || "Text processing";
   return item.settings?.speed === "fast" || String(item.endpoint || "").includes("/fast/") ? "Seedance 2.0 Fast" : "Seedance 2.0";
 }
 
-function addAggregate(map, name, item) {
-  const row = map.get(name) || { name, count: 0, cost: 0 };
+function addAggregate(map, key, item, label = key) {
+  const row = map.get(key) || { name: label, count: 0, cost: 0 };
   row.count += 1;
   row.cost = round(row.cost + item.cost);
-  map.set(name, row);
+  map.set(key, row);
 }
 
 function aggregateRows(map) {

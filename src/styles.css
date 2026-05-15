@@ -44,6 +44,20 @@ button {
   padding: 24px 0 56px;
 }
 
+.app-shell.node-app-shell {
+  width: 100%;
+  max-width: none;
+  padding: 24px 16px 16px;
+}
+
+.nodes-tab-keepalive {
+  display: none;
+}
+
+.nodes-tab-keepalive.active {
+  display: block;
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -872,7 +886,6 @@ textarea::placeholder {
   aspect-ratio: 1;
   place-items: center;
   border-radius: 50%;
-  background: conic-gradient(#4d8cff var(--image-percent), #ddc631 0);
 }
 
 .media-donut span {
@@ -909,11 +922,15 @@ textarea::placeholder {
 }
 
 .image-dot {
-  background: #4d8cff;
+  background: #3d85ff;
 }
 
 .video-dot {
-  background: #ddc631;
+  background: #58ce63;
+}
+
+.text-dot {
+  background: #f0c83b;
 }
 
 .media-legend small {
@@ -981,7 +998,7 @@ textarea::placeholder {
   padding: 5px 8px;
   border-radius: 999px;
   color: #111;
-  background: #ddc631;
+  background: #58ce63;
   font-size: 11px;
   font-weight: 860;
   text-transform: uppercase;
@@ -989,7 +1006,17 @@ textarea::placeholder {
 
 .media-pill.image {
   color: #f7f1e8;
-  background: #2e68d8;
+  background: #3d85ff;
+}
+
+.media-pill.video {
+  color: #111;
+  background: #58ce63;
+}
+
+.media-pill.text {
+  color: #111;
+  background: #f0c83b;
 }
 
 .recent-table strong {

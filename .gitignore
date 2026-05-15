@@ -2,11 +2,14 @@ node_modules/
 dist/
 .env
 .DS_Store
+*.lnk
 uploads/*
 outputs/*
+saved_workflows/*.json
 server/data/history.json
 server/data/node-projects.json
 .vs_ai_logs/
 .newtnode_logs/
 !uploads/.gitkeep
 !outputs/.gitkeep
+!saved_workflows/.gitkeep

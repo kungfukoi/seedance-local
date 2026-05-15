@@ -10,6 +10,8 @@ A local browser app for generating images and Seedance 2.0 videos through API pr
    npm install
    ```
 
+   If you already have the repository locally and just pulled new changes, run `npm install` again before starting the app. This installs any newly added packages and prevents Vite import-resolution errors such as missing `three`.
+
 2. Create your local environment file:
 
    ```bash

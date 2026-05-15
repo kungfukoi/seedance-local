@@ -5,7 +5,7 @@ import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { File } from "node:buffer";
 import { randomUUID } from "node:crypto";
@@ -16,19 +16,35 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
 const uploadsDir = path.join(rootDir, "uploads");
 const outputsDir = path.join(rootDir, "outputs");
+const savedWorkflowsDir = path.join(rootDir, "saved_workflows");
 const dataDir = path.join(__dirname, "data");
 const historyPath = path.join(dataDir, "history.json");
 const nodeProjectsPath = path.join(dataDir, "node-projects.json");
+let historyWriteQueue = Promise.resolve();
 const port = Number(process.env.PORT || 3333);
-const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_PER_SECOND || 0.3034);
-const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.2419);
+const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_PER_SECOND || 0.014);
+const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.0112);
 const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.134);
 const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.24);
 const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 0.053);
+const falTextRequestCost = Number(process.env.FAL_TEXT_REQUEST_COST || 0.001);
+const falVisionTextUnitCost = Number(process.env.FAL_VISION_TEXT_UNIT_COST || 0.01);
+const falVideoTextUnitCost = Number(process.env.FAL_VIDEO_TEXT_UNIT_COST || 0.01);
+const falUtilityImageTimeoutMs = Math.max(30000, Number(process.env.FAL_UTILITY_IMAGE_TIMEOUT_MS) || 180000);
+const openAiTextModel = process.env.OPENAI_TEXT_MODEL || "gpt-5.5";
+const openAiTextApiKey = process.env.OPENAI_TEXT_API_KEY || process.env.OPENAI_API_KEY;
+const openAiImageApiKey = process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY;
+const textLlmProvider = String(process.env.TEXT_LLM_PROVIDER || "fal").toLowerCase();
+const falTextModel = process.env.FAL_TEXT_MODEL || "openai/gpt-4o";
+const falVisionTextModel = process.env.FAL_VISION_TEXT_MODEL || falTextModel;
+const falVideoTextModel = process.env.FAL_VIDEO_TEXT_MODEL || "google/gemini-2.5-flash";
+const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
+const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
+const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
 
 const app = express();
 
-await Promise.all([mkdir(uploadsDir, { recursive: true }), mkdir(outputsDir, { recursive: true }), mkdir(dataDir, { recursive: true })]);
+await Promise.all([mkdir(uploadsDir, { recursive: true }), mkdir(outputsDir, { recursive: true }), mkdir(savedWorkflowsDir, { recursive: true }), mkdir(dataDir, { recursive: true })]);
 
 if (process.env.FAL_KEY) {
   fal.config({ credentials: process.env.FAL_KEY });
@@ -59,8 +75,18 @@ app.use("/outputs", express.static(outputsDir));
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
+    routes: {
+      utilityImage: true,
+      utilityVideo: true
+    },
     falKeyConfigured: Boolean(process.env.FAL_KEY),
-    openAiKeyConfigured: Boolean(process.env.OPENAI_API_KEY),
+    openAiKeyConfigured: Boolean(process.env.OPENAI_API_KEY || openAiTextApiKey || openAiImageApiKey),
+    openAiTextKeyConfigured: Boolean(openAiTextApiKey),
+    openAiImageKeyConfigured: Boolean(openAiImageApiKey),
+    textLlmProvider,
+    falTextModel,
+    falVisionTextModel,
+    falVideoTextModel,
     outputDirectory: outputsDir
   });
 });
@@ -87,6 +113,12 @@ app.get("/api/stats", async (_req, res) => {
       openAiImage2: {
         mediumCost: openAiImage2MediumCost,
         currency: "USD"
+      },
+      textProcessing: {
+        falRequestCost: falTextRequestCost,
+        falVisionUnitCost: falVisionTextUnitCost,
+        falVideoUnitCost: falVideoTextUnitCost,
+        currency: "USD"
       }
     }
   });
@@ -95,6 +127,69 @@ app.get("/api/stats", async (_req, res) => {
 app.get("/api/node-projects", async (_req, res) => {
   const projects = await readNodeProjects();
   res.json(projects.map(({ graph, ...project }) => project));
+});
+
+app.get("/api/saved-workflows", async (_req, res) => {
+  const workflows = await readSavedWorkflows();
+  res.json(workflows.map(({ graph, ...workflow }) => workflow));
+});
+
+app.get("/api/saved-workflows/:fileName", async (req, res) => {
+  const fileName = safeWorkflowFileName(req.params.fileName);
+  if (!fileName) {
+    return res.status(400).json({ error: "Invalid workflow file name." });
+  }
+  const workflows = await readSavedWorkflows();
+  const workflow = workflows.find((item) => item.fileName === fileName);
+
+  if (!workflow) {
+    return res.status(404).json({ error: "Workflow not found." });
+  }
+
+  res.json(workflow);
+});
+
+app.post("/api/saved-workflows", async (req, res) => {
+  const workflows = await readSavedWorkflows();
+  const now = new Date().toISOString();
+  const id = String(req.body.id || randomUUID()).trim();
+  const name = String(req.body.name || "Untitled node project").trim() || "Untitled node project";
+  const existing = workflows.find((item) => item.id === id);
+  const fileName = existing?.fileName || uniqueWorkflowFileName(name, workflows);
+  const workflow = {
+    id,
+    name,
+    fileName,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+    app: "NewtNode",
+    version: 1,
+    graph: {
+      nodes: Array.isArray(req.body.nodes) ? req.body.nodes : [],
+      edges: Array.isArray(req.body.edges) ? req.body.edges : [],
+      groups: Array.isArray(req.body.groups) ? req.body.groups : [],
+      viewport: req.body.viewport || { x: 0, y: 0, scale: 1 }
+    }
+  };
+
+  await writeWorkflowFile(workflow);
+  res.json(workflow);
+});
+
+app.delete("/api/saved-workflows/:fileName", async (req, res) => {
+  const fileName = safeWorkflowFileName(req.params.fileName);
+  if (!fileName) {
+    return res.status(400).json({ error: "Invalid workflow file name." });
+  }
+  const filePath = path.join(savedWorkflowsDir, fileName);
+
+  if (!existsSync(filePath)) {
+    return res.status(404).json({ error: "Workflow not found." });
+  }
+
+  await rm(filePath, { force: true });
+  const workflows = await readSavedWorkflows();
+  res.json(workflows.map(({ graph, ...workflow }) => workflow));
 });
 
 app.get("/api/node-projects/:id", async (req, res) => {
@@ -120,6 +215,7 @@ app.post("/api/node-projects", async (req, res) => {
     graph: {
       nodes: Array.isArray(req.body.nodes) ? req.body.nodes : [],
       edges: Array.isArray(req.body.edges) ? req.body.edges : [],
+      groups: Array.isArray(req.body.groups) ? req.body.groups : [],
       viewport: req.body.viewport || { x: 0, y: 0, scale: 1 }
     }
   };
@@ -178,6 +274,56 @@ app.post("/api/node/upload-transfer-collage", upload.single("asset"), async (req
   return handleTransferCollageUpload(req, res);
 });
 
+app.post("/api/node/process-text", async (req, res) => {
+  try {
+    const text = String(req.body.text || "").trim();
+    const textInputs = normalizedTextInputs(req.body.textInputs);
+    const imageInputs = normalizedMediaInputs(req.body.imageInputs, "image");
+    const videoInputs = normalizedMediaInputs(req.body.videoInputs, "video");
+    if (!text && !textInputs.length && !imageInputs.length && !videoInputs.length) {
+      return res.status(400).json({ error: "Text is required." });
+    }
+
+    const result = textLlmProvider === "openai" ? await processTextWithOpenAi({ text, textInputs, imageInputs, videoInputs }) : await processTextWithFal({ text, textInputs, imageInputs, videoInputs });
+    const cost = estimateTextProcessingCost({ provider: result.provider, imageInputs, videoInputs });
+
+    await appendHistory({
+      id: randomUUID(),
+      createdAt: new Date().toISOString(),
+      mediaType: "text",
+      provider: result.provider,
+      modelName: result.model,
+      endpoint: result.endpoint,
+      mode: "Text processing",
+      prompt: text || textInputs.map((item) => item.text).join("\n\n"),
+      submittedPrompt: result.submittedPrompt || text,
+      project: projectFromBody(req.body),
+      node: nodeFromBody(req.body),
+      settings: {
+        model: result.model,
+        provider: result.provider,
+        textInputCount: textInputs.length,
+        imageInputCount: imageInputs.length,
+        videoInputCount: videoInputs.length
+      },
+      cost,
+      text: result.text,
+      usage: result.usage || null
+    });
+
+    res.json({
+      text: result.text,
+      model: result.model,
+      provider: result.provider,
+      cost,
+      usage: result.usage || null
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message || "Text processing failed." });
+  }
+});
+
 async function handleTransferCollageUpload(req, res) {
   if (!req.file) {
     return res.status(400).json({ error: "No transfer collage uploaded." });
@@ -215,9 +361,21 @@ app.post("/api/node/generate-image", async (req, res) => {
     const imagePromptUrls = Array.isArray(req.body.imagePromptUrls) ? req.body.imagePromptUrls.filter(isLocalAssetUrl) : [];
     const imagePromptLabels = Array.isArray(req.body.imagePromptLabels) ? req.body.imagePromptLabels : [];
 
+    if (selectedModel.provider === "disabled") {
+      return res.status(400).json({ error: `${selectedModel.displayName} is temporarily disabled.` });
+    }
+
+    if (selectedModel.provider === "fal-sam3-image") {
+      return runSam3ImageSegmentation(req, res, {
+        prompt,
+        imagePromptUrls,
+        imagePromptLabels
+      });
+    }
+
     if (selectedModel.provider === "openai") {
-      if (!process.env.OPENAI_API_KEY) {
-        return res.status(400).json({ error: "Missing OPENAI_API_KEY in .env." });
+      if (!openAiImageApiKey) {
+        return res.status(400).json({ error: "Missing OPENAI_IMAGE_API_KEY in .env." });
       }
 
       const openAiImage = await generateOpenAiImage({
@@ -228,7 +386,7 @@ app.post("/api/node/generate-image", async (req, res) => {
         resolution: req.body.resolution
       });
       const extension = extensionForMime(openAiImage.mimeType);
-      const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-openai-image-2${extension}`;
+      const fileName = uniqueOutputFileName("openai-image-2", extension);
       await writeFile(path.join(outputsDir, fileName), openAiImage.bytes);
 
       const cost = estimateOpenAiImage2Cost({
@@ -300,42 +458,15 @@ app.post("/api/node/generate-image", async (req, res) => {
       });
     }
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": process.env.GOOGLE_API_KEY
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts
-          }
-        ],
-        generationConfig: {
-          responseModalities: ["TEXT", "IMAGE"],
-          imageConfig
-        }
-      })
+    const { text, inlineData, attempts } = await generateGeminiImageWithRetries({
+      model,
+      parts,
+      imageConfig
     });
-
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data?.error?.message || "Image generation failed.", raw: data });
-    }
-
-    const responseParts = data?.candidates?.[0]?.content?.parts || [];
-    const text = responseParts.find((part) => part.text)?.text || "";
-    const imagePart = responseParts.find((part) => part.inlineData?.data || part.inline_data?.data);
-    const inlineData = imagePart?.inlineData || imagePart?.inline_data;
-
-    if (!inlineData?.data) {
-      return res.status(502).json({ error: "Gemini returned no image data.", text, raw: data });
-    }
 
     const mimeType = inlineData.mimeType || inlineData.mime_type || "image/png";
     const extension = extensionForMime(mimeType);
-    const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-nano-banana-pro${extension}`;
+    const fileName = uniqueOutputFileName("nano-banana-pro", extension);
     const imageBytes = Buffer.from(inlineData.data, "base64");
     await writeFile(path.join(outputsDir, fileName), imageBytes);
 
@@ -357,6 +488,7 @@ app.post("/api/node/generate-image", async (req, res) => {
         aspectRatio: req.body.aspectRatio || "21:9",
         resolution: req.body.resolution || "2K",
         imageConfig,
+        attempts,
         imagePromptCount: imagePromptUrls.length
       },
       cost,
@@ -376,8 +508,649 @@ app.post("/api/node/generate-image", async (req, res) => {
       }
     });
   } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ error: error.message || "Image generation failed.", text: error.text || "", raw: error.raw });
+    }
+
     console.error(error);
     res.status(500).json({ error: error.message || "Image generation failed." });
+  }
+});
+
+async function runSam3ImageSegmentation(req, res, { prompt, imagePromptUrls, imagePromptLabels }) {
+  if (!process.env.FAL_KEY) {
+    return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+  }
+
+  const imageUrl = firstLocalOutput(imagePromptUrls);
+  if (!imageUrl) {
+    return res.status(400).json({ error: "SAM 3 Image requires a connected image." });
+  }
+
+  const endpoint = "fal-ai/sam-3/image";
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    prompt,
+    apply_mask: true,
+    output_format: "png",
+    return_multiple_masks: true,
+    max_masks: 3,
+    include_scores: true,
+    include_boxes: true
+  };
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteImage = firstFalImageResult(result?.data);
+
+  if (!remoteImage?.url && Array.isArray(result?.data?.masks) && !result.data.masks.length) {
+    return res.status(422).json({
+      error: "SAM 3 Image did not find a matching segment. Try naming a visible object in the image, like helmet, face, person, or robot.",
+      raw: result?.data
+    });
+  }
+
+  if (!remoteImage?.url) {
+    return res.status(502).json({ error: "Fal returned no segmentation image URL.", raw: result?.data });
+  }
+
+  const output = await downloadImage(remoteImage.url, "sam-3-image-segmentation", remoteImage.content_type || remoteImage.mimeType);
+  const returnedMaskCount = Array.isArray(result?.data?.masks) ? result.data.masks.length : 0;
+  const maskCount = returnedMaskCount || 1;
+  const text = `Segmented ${maskCount} ${maskCount === 1 ? "mask" : "masks"}.`;
+  const cost = estimateSam3ImageCost({ endpoint });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: "SAM 3 Image",
+    endpoint,
+    mode: "SAM 3 image segmentation",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: req.body.model || "SAM 3 Image",
+      imageCount: 1,
+      imagePromptLabel: cleanImagePromptLabel(imagePromptLabels[0]),
+      applyMask: input.apply_mask,
+      outputFormat: input.output_format,
+      includeScores: input.include_scores,
+      includeBoxes: input.include_boxes,
+      maskCount
+    },
+    cost,
+    remoteImage,
+    remoteMasks: result?.data?.masks || [],
+    metadata: result?.data?.metadata || [],
+    scores: result?.data?.scores || [],
+    boxes: result?.data?.boxes || [],
+    localImage: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: "SAM 3 Image",
+    text,
+    cost,
+    image: {
+      ...remoteImage,
+      label: "SAM 3 Image",
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    }
+  });
+}
+
+app.post("/api/node/utility-image", async (req, res) => {
+  try {
+    if (!process.env.FAL_KEY) {
+      return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+    }
+
+    const selectedModel = resolveUtilityImageModel(req.body.model);
+    const imageUrl = firstLocalOutput(req.body.imageUrls);
+    if (!imageUrl) {
+      return res.status(400).json({ error: `${selectedModel.displayName} requires a connected image.` });
+    }
+
+    if (selectedModel.provider === "fal-dwpose") {
+      return runDwposeUtilityImage(req, res, { imageUrl, selectedModel });
+    }
+
+    if (selectedModel.provider === "fal-depth-anything") {
+      return runDepthAnythingUtilityImage(req, res, { imageUrl, selectedModel });
+    }
+
+    if (selectedModel.provider === "fal-patina") {
+      return runPatinaUtilityImage(req, res, { imageUrl, selectedModel });
+    }
+
+    if (selectedModel.provider === "fal-birefnet-image") {
+      return runBirefnetUtilityImage(req, res, { imageUrl, selectedModel });
+    }
+
+    if (selectedModel.provider === "fal-sam3-image") {
+      const prompt = String(req.body.prompt || "").trim();
+      if (!prompt) {
+        return res.status(400).json({ error: "SAM 3 Image requires a segmentation prompt." });
+      }
+
+      return runSam3ImageSegmentation(req, res, {
+        prompt,
+        imagePromptUrls: [imageUrl],
+        imagePromptLabels: ["Utility image"]
+      });
+    }
+
+    return res.status(400).json({ error: "Unsupported Utility image model." });
+  } catch (error) {
+    console.error(error);
+    res.status(errorStatusCode(error)).json({ error: publicErrorMessage(error, "Utility image failed.") });
+  }
+});
+
+async function subscribeToFalWithTimeout(endpoint, input, label, timeoutMs = falUtilityImageTimeoutMs) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      fal.subscribe(endpoint, { input, logs: true }),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          const error = new Error(`${label} timed out waiting for Fal. Try again in a moment.`);
+          error.statusCode = 504;
+          reject(error);
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function runDwposeUtilityImage(req, res, { imageUrl, selectedModel }) {
+  const endpoint = selectedModel.id;
+  const drawMode = normalizeChoice(req.body.dwposeDrawMode, ["full-pose", "body-pose", "face-pose", "hand-pose", "face-hand-mask", "face-mask", "hand-mask"], "body-pose");
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    draw_mode: drawMode
+  };
+
+  const result = await subscribeToFalWithTimeout(endpoint, input, selectedModel.displayName);
+  const remoteImage = firstFalImageResult(result?.data);
+
+  if (!remoteImage?.url) {
+    return res.status(502).json({ error: "Fal returned no DWPose image URL.", raw: result?.data });
+  }
+
+  const output = await downloadImage(remoteImage.url, "dwpose", remoteImage.content_type || remoteImage.mimeType);
+  const cost = estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    pricingBasis: "DWPose fal.ai image utility request; local price estimate not configured"
+  });
+  const text = `DWPose ${drawMode.replace(/-/g, " ")} map.`;
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: selectedModel.displayName,
+    endpoint,
+    mode: "DWPose image pose preprocessor",
+    prompt: text,
+    submittedPrompt: text,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedModel.displayName,
+      drawMode,
+      sourceImageCount: 1
+    },
+    cost,
+    remoteImage,
+    localImage: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedModel.displayName,
+    text,
+    cost,
+    image: {
+      ...remoteImage,
+      label: selectedModel.displayName,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    },
+    images: [
+      {
+        ...remoteImage,
+        label: selectedModel.displayName,
+        localUrl: output.publicPath,
+        fileName: output.fileName,
+        mimeType: output.mimeType
+      }
+    ]
+  });
+}
+
+async function runDepthAnythingUtilityImage(req, res, { imageUrl, selectedModel }) {
+  const endpoint = selectedModel.id;
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl)
+  };
+
+  const result = await subscribeToFalWithTimeout(endpoint, input, selectedModel.displayName);
+  const remoteImage = firstFalImageResult(result?.data);
+
+  if (!remoteImage?.url) {
+    return res.status(502).json({ error: "Fal returned no Depth Anything image URL.", raw: result?.data });
+  }
+
+  const output = await downloadImage(remoteImage.url, "depth-anything", remoteImage.content_type || remoteImage.mimeType);
+  const cost = estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    pricingBasis: "Depth Anything v2 fal.ai image preprocessor request; local price estimate not configured"
+  });
+  const text = "Depth Anything v2 map.";
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: selectedModel.displayName,
+    endpoint,
+    mode: "Depth Anything image depth preprocessor",
+    prompt: text,
+    submittedPrompt: text,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedModel.displayName,
+      sourceImageCount: 1
+    },
+    cost,
+    remoteImage,
+    localImage: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedModel.displayName,
+    text,
+    cost,
+    image: {
+      ...remoteImage,
+      label: selectedModel.displayName,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    },
+    images: [
+      {
+        ...remoteImage,
+        label: selectedModel.displayName,
+        localUrl: output.publicPath,
+        fileName: output.fileName,
+        mimeType: output.mimeType
+      }
+    ]
+  });
+}
+
+async function runPatinaUtilityImage(req, res, { imageUrl, selectedModel }) {
+  const endpoint = selectedModel.id;
+  const maps = normalizePatinaMaps(req.body.patinaMaps);
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    maps,
+    enable_safety_checker: true,
+    output_format: normalizeChoice(req.body.patinaOutputFormat, ["jpeg", "png", "webp"], "png")
+  };
+  const seed = optionalInteger(req.body.patinaSeed);
+  if (seed !== undefined) input.seed = seed;
+
+  const result = await subscribeToFalWithTimeout(endpoint, input, selectedModel.displayName);
+  const remoteImages = falImageResults(result?.data);
+
+  if (!remoteImages.length) {
+    return res.status(502).json({ error: "Fal returned no Patina map image URLs.", raw: result?.data });
+  }
+
+  const outputs = [];
+  for (const [index, remoteImage] of remoteImages.entries()) {
+    const mapType = normalizePatinaMapId(remoteImage.map_type || maps[index]) || `map-${index + 1}`;
+    const output = await downloadImage(remoteImage.url, `patina-${mapType}`, remoteImage.content_type || remoteImage.mimeType);
+    outputs.push({
+      remoteImage,
+      output,
+      mapType,
+      label: `Patina ${formatPatinaMapLabel(mapType)}`
+    });
+  }
+
+  const cost = estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    pricingBasis: "Patina fal.ai image-to-PBR-maps request; local price estimate not configured"
+  });
+  const text = `Patina ${outputs.map((item) => formatPatinaMapLabel(item.mapType)).join(", ")} maps.`;
+  const outputBytes = outputs.reduce((sum, item) => sum + item.output.bytes, 0);
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: selectedModel.displayName,
+    endpoint,
+    mode: "Patina image PBR map preprocessor",
+    prompt: text,
+    submittedPrompt: text,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedModel.displayName,
+      maps,
+      outputFormat: input.output_format,
+      seed: result?.data?.seed ?? input.seed ?? null,
+      sourceImageCount: 1
+    },
+    cost,
+    remoteImage: remoteImages[0],
+    remoteImages,
+    localImage: outputs[0].output.publicPath,
+    localImages: outputs.map((item) => item.output.publicPath),
+    outputFileName: outputs[0].output.fileName,
+    outputBytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedModel.displayName,
+    text,
+    seed: result?.data?.seed ?? input.seed,
+    cost,
+    image: {
+      ...outputs[0].remoteImage,
+      label: outputs[0].label,
+      localUrl: outputs[0].output.publicPath,
+      fileName: outputs[0].output.fileName,
+      mimeType: outputs[0].output.mimeType
+    },
+    images: outputs.map(({ remoteImage, output, label, mapType }) => ({
+      ...remoteImage,
+      label,
+      mapType,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    }))
+  });
+}
+
+async function runBirefnetUtilityImage(req, res, { imageUrl, selectedModel }) {
+  const endpoint = selectedModel.id;
+  const options = req.body.birefnet || {};
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    model: normalizeChoice(options.model, birefnetModelOptions, "General Use (Light)"),
+    operating_resolution: normalizeChoice(options.operatingResolution, birefnetResolutionOptions, "1024x1024"),
+    output_mask: Boolean(options.outputMask),
+    refine_foreground: options.refineForeground !== false,
+    output_format: normalizeChoice(options.outputFormat, ["webp", "png", "gif"], "png"),
+    mask_only: Boolean(options.maskOnly)
+  };
+
+  const result = await subscribeToFalWithTimeout(endpoint, input, selectedModel.displayName);
+  const remoteImage = firstFalImageResult(result?.data);
+  const remoteMask = normalizeFalFile(result?.data?.mask_image);
+
+  if (!remoteImage?.url) {
+    return res.status(502).json({ error: "Fal returned no BiRefNet image URL.", raw: result?.data });
+  }
+
+  const output = await downloadImage(remoteImage.url, "birefnet-image", remoteImage.content_type || remoteImage.mimeType);
+  const images = [
+    {
+      remoteImage,
+      output,
+      label: input.mask_only ? "BiRefNet Mask" : "BiRefNet Image"
+    }
+  ];
+
+  if (input.output_mask && remoteMask?.url && remoteMask.url !== remoteImage.url) {
+    const maskOutput = await downloadImage(remoteMask.url, "birefnet-mask", remoteMask.content_type || remoteMask.mimeType);
+    images.push({
+      remoteImage: remoteMask,
+      output: maskOutput,
+      label: "BiRefNet Mask"
+    });
+  }
+
+  const cost = estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    pricingBasis: "BiRefNet v2 fal.ai image background removal request; local price estimate not configured"
+  });
+  const text = input.mask_only ? "BiRefNet segmentation mask." : "BiRefNet background removed image.";
+  const outputBytes = images.reduce((sum, item) => sum + item.output.bytes, 0);
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "image",
+    provider: "fal.ai",
+    modelName: selectedModel.displayName,
+    endpoint,
+    mode: "BiRefNet image background removal",
+    prompt: text,
+    submittedPrompt: text,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: input.model,
+      operatingResolution: input.operating_resolution,
+      outputMask: input.output_mask,
+      refineForeground: input.refine_foreground,
+      outputFormat: input.output_format,
+      maskOnly: input.mask_only,
+      sourceImageCount: 1
+    },
+    cost,
+    remoteImage,
+    localImage: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes,
+    text
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedModel.displayName,
+    text,
+    cost,
+    image: {
+      ...remoteImage,
+      label: images[0].label,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    },
+    images: images.map(({ remoteImage, output, label }) => ({
+      ...remoteImage,
+      label,
+      localUrl: output.publicPath,
+      fileName: output.fileName,
+      mimeType: output.mimeType
+    }))
+  });
+}
+
+app.post("/api/node/utility-video", async (req, res) => {
+  try {
+    if (!process.env.FAL_KEY) {
+      return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+    }
+
+    const selectedVideoModel = resolveUtilityVideoModel(req.body.model);
+    const prompt = String(req.body.prompt || "").trim();
+    const referenceImageUrls = Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [];
+    const referenceVideoUrls = Array.isArray(req.body.referenceVideoUrls) ? req.body.referenceVideoUrls.filter(isLocalAssetUrl) : [];
+    const maskVideoUrls = Array.isArray(req.body.maskVideoUrls) ? req.body.maskVideoUrls.filter(isLocalAssetUrl) : [];
+
+    if (!prompt && selectedVideoModel.requiresPrompt) {
+      return res.status(400).json({ error: `${selectedVideoModel.displayName} requires a prompt.` });
+    }
+
+    if (selectedVideoModel.provider === "fal-sam3-video") {
+      return runSam3VideoSegmentation(req, res, {
+        prompt,
+        referenceVideoUrls
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-void-video-inpainting") {
+      return runVoidVideoInpaintingUtility(req, res, {
+        prompt,
+        referenceVideoUrls,
+        maskVideoUrls,
+        selectedVideoModel
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-birefnet-video") {
+      return runBirefnetUtilityVideo(req, res, {
+        referenceVideoUrls,
+        selectedVideoModel
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-wan-fun-control") {
+      return runWanFunControlVideo(req, res, {
+        prompt,
+        referenceImageUrls,
+        referenceVideoUrls
+      });
+    }
+
+    return res.status(400).json({ error: "Unsupported Utility video model." });
+  } catch (error) {
+    console.error(error);
+    res.status(errorStatusCode(error)).json({ error: publicErrorMessage(error, "Utility video failed.") });
+  }
+});
+
+app.post("/api/node/qwen-camera-edit", async (req, res) => {
+  try {
+    if (!process.env.FAL_KEY) {
+      return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+    }
+
+    const imageUrl = firstLocalOutput(req.body.imageUrls);
+    if (!imageUrl) {
+      return res.status(400).json({ error: "Qwen Camera Edit requires a connected image." });
+    }
+
+    const endpoint = "fal-ai/qwen-image-edit-2511-multiple-angles";
+    const input = {
+      image_urls: [await uploadLocalOutputToFal(imageUrl)],
+      horizontal_angle: clampNumber(req.body.horizontalAngle, 0, 360, 90),
+      vertical_angle: clampNumber(req.body.verticalAngle, -30, 90, 0),
+      zoom: clampNumber(req.body.zoom, 0, 10, 5),
+      additional_prompt: String(req.body.additionalPrompt || "").trim(),
+      lora_scale: clampNumber(req.body.loraScale, 0, 2, 1),
+      guidance_scale: clampNumber(req.body.guidanceScale, 1, 12, 4.5),
+      num_inference_steps: clampInteger(req.body.numInferenceSteps, 1, 60, 28),
+      acceleration: "regular",
+      output_format: "png",
+      num_images: 1,
+      enable_safety_checker: true
+    };
+
+    const result = await fal.subscribe(endpoint, { input, logs: true });
+    const remoteImage = firstFalImageResult(result?.data);
+
+    if (!remoteImage?.url) {
+      return res.status(502).json({ error: "Fal returned no Qwen camera image URL.", raw: result?.data });
+    }
+
+    const output = await downloadImage(remoteImage.url, "qwen-camera-edit", remoteImage.content_type || remoteImage.mimeType);
+    const prompt = result?.data?.prompt || qwenCameraPromptLabel(input);
+    const cost = estimateQwenCameraEditCost({ endpoint, image: remoteImage });
+
+    await appendHistory({
+      id: result.requestId || randomUUID(),
+      createdAt: new Date().toISOString(),
+      mediaType: "image",
+      provider: "fal.ai",
+      modelName: "Qwen Image Edit 2511 Multiple Angles",
+      endpoint,
+      mode: "3D camera angle image edit",
+      prompt,
+      submittedPrompt: prompt,
+      project: projectFromBody(req.body),
+      node: nodeFromBody(req.body),
+      settings: {
+        horizontalAngle: input.horizontal_angle,
+        verticalAngle: input.vertical_angle,
+        zoom: input.zoom,
+        additionalPrompt: input.additional_prompt,
+        loraScale: input.lora_scale,
+        guidanceScale: input.guidance_scale,
+        numInferenceSteps: input.num_inference_steps,
+        acceleration: input.acceleration,
+        outputFormat: input.output_format,
+        sourceImageCount: 1,
+        seed: result?.data?.seed ?? null
+      },
+      cost,
+      remoteImage,
+      localImage: output.publicPath,
+      outputFileName: output.fileName,
+      outputBytes: output.bytes,
+      text: prompt
+    });
+
+    return res.json({
+      requestId: result.requestId,
+      endpoint,
+      prompt,
+      seed: result?.data?.seed,
+      cost,
+      image: {
+        ...remoteImage,
+        localUrl: output.publicPath,
+        fileName: output.fileName,
+        mimeType: output.mimeType
+      }
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message || "Qwen camera edit failed." });
   }
 });
 
@@ -392,7 +1165,36 @@ app.post("/api/node/generate-video", async (req, res) => {
       return res.status(400).json({ error: "Prompt is required." });
     }
 
-    const speed = String(req.body.model || "").toLowerCase().includes("fast") ? "fast" : "standard";
+    const selectedVideoModel = resolveVideoModel(req.body.model);
+
+    if (selectedVideoModel.provider === "disabled") {
+      return res.status(400).json({ error: `${selectedVideoModel.displayName} is temporarily disabled.` });
+    }
+
+    if (selectedVideoModel.provider === "fal-wan-fun-control") {
+      return runWanFunControlVideo(req, res, {
+        prompt,
+        referenceImageUrls: Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [],
+        referenceVideoUrls: Array.isArray(req.body.referenceVideoUrls) ? req.body.referenceVideoUrls.filter(isLocalAssetUrl) : []
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-aurora") {
+      return runAuroraVideo(req, res, {
+        prompt,
+        referenceImageUrls: Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [],
+        referenceAudioUrls: Array.isArray(req.body.referenceAudioUrls) ? req.body.referenceAudioUrls.filter(isLocalAssetUrl) : []
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-sam3-video") {
+      return runSam3VideoSegmentation(req, res, {
+        prompt,
+        referenceVideoUrls: Array.isArray(req.body.referenceVideoUrls) ? req.body.referenceVideoUrls.filter(isLocalAssetUrl) : []
+      });
+    }
+
+    const speed = selectedVideoModel.speed;
     const speedPrefix = speed === "fast" ? "fast/" : "";
     const startFrameUrl = firstLocalOutput(req.body.startFrameUrls);
     const endFrameUrl = firstLocalOutput(req.body.endFrameUrls);
@@ -494,6 +1296,417 @@ app.post("/api/node/generate-video", async (req, res) => {
     res.status(500).json({ error: error.message || "Video generation failed." });
   }
 });
+
+async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "SAM 3 Video requires a connected video." });
+  }
+
+  const endpoint = "fal-ai/sam-3/video";
+  const options = req.body.sam3Video || {};
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    prompt,
+    apply_mask: true,
+    video_output_type: "X264 (.mp4)",
+    detection_threshold: clampNumber(options.detectionThreshold, 0, 1, 0.5)
+  };
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no segmentation video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "sam-3-video-segmentation");
+  const cost = estimateSam3VideoCost({ endpoint });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: "SAM 3 Video",
+    endpoint,
+    mode: "SAM 3 video segmentation",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: req.body.model || "SAM 3 Video",
+      videoCount: 1,
+      applyMask: input.apply_mask,
+      outputType: input.video_output_type,
+      detectionThreshold: input.detection_threshold
+    },
+    cost,
+    remoteVideo,
+    boundingboxFramesZip: normalizeFalFile(result?.data?.boundingbox_frames_zip),
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: "SAM 3 Video",
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
+
+async function runAuroraVideo(req, res, { prompt, referenceImageUrls, referenceAudioUrls }) {
+  const imageUrl = firstLocalOutput(referenceImageUrls);
+  if (!imageUrl) {
+    return res.status(400).json({ error: "Creatify Aurora requires a connected image." });
+  }
+
+  const audioUrl = firstLocalOutput(referenceAudioUrls);
+  if (!audioUrl) {
+    return res.status(400).json({ error: "Creatify Aurora requires a connected audio file." });
+  }
+
+  const endpoint = "fal-ai/creatify/aurora";
+  const resolution = normalizeChoice(req.body.resolution, ["480p", "720p"], "720p");
+  const input = {
+    image_url: await uploadLocalOutputToFal(imageUrl),
+    audio_url: await uploadLocalOutputToFal(audioUrl),
+    prompt,
+    resolution
+  };
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = result?.data?.video;
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "creatify-aurora");
+  const cost = estimateAuroraCost({ endpoint, resolution, duration: remoteVideo.duration });
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: "Creatify Aurora",
+    endpoint,
+    mode: "Aurora lipsync image and audio to video",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      resolution,
+      imageCount: 1,
+      audioCount: 1
+    },
+    cost,
+    remoteVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
+
+async function runWanFunControlVideo(req, res, { prompt, referenceImageUrls, referenceVideoUrls }) {
+  const controlVideoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!controlVideoUrl) {
+    return res.status(400).json({ error: "Wan Fun Control requires a connected control video." });
+  }
+
+  const options = req.body.wanFunControl || {};
+  const endpoint = "fal-ai/wan-fun-control";
+  const matchInputNumFrames = options.matchInputNumFrames !== false;
+  const matchInputFps = options.matchInputFps !== false;
+  const preprocessVideo = options.preprocessVideo !== false;
+  const input = {
+    prompt,
+    control_video_url: await uploadLocalOutputToFal(controlVideoUrl),
+    preprocess_video: preprocessVideo,
+    preprocess_type: normalizeChoice(options.preprocessType, ["depth", "pose"], "depth"),
+    match_input_num_frames: matchInputNumFrames,
+    match_input_fps: matchInputFps,
+    num_inference_steps: clampInteger(options.numInferenceSteps, 1, 60, 27),
+    guidance_scale: clampNumber(options.guidanceScale, 0, 20, 6),
+    shift: clampNumber(options.shift, 0, 20, 5)
+  };
+  const seed = optionalInteger(options.seed);
+  const referenceImageUrl = firstLocalOutput(referenceImageUrls);
+
+  if (!matchInputNumFrames) input.num_frames = clampInteger(options.numFrames, 1, 241, 81);
+  if (!matchInputFps) input.fps = clampInteger(options.fps, 1, 60, 16);
+  if (seed !== undefined) input.seed = seed;
+  if (referenceImageUrl) input.reference_image_url = await uploadLocalOutputToFal(referenceImageUrl);
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = result?.data?.video;
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "wan-fun-control");
+  const cost = estimateWanFunControlCost({
+    endpoint,
+    matchInputNumFrames,
+    numFrames: input.num_frames,
+    matchInputFps,
+    fps: input.fps
+  });
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: "Wan Fun Control",
+    endpoint,
+    mode: "Wan Fun Control video to video",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      preprocessVideo,
+      preprocessType: input.preprocess_type,
+      matchInputNumFrames,
+      numFrames: input.num_frames || null,
+      matchInputFps,
+      fps: input.fps || null,
+      numInferenceSteps: input.num_inference_steps,
+      guidanceScale: input.guidance_scale,
+      shift: input.shift,
+      controlVideoCount: 1,
+      referenceImageCount: referenceImageUrl ? 1 : 0,
+      seed: result?.data?.seed ?? input.seed ?? null
+    },
+    cost,
+    remoteVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    seed: result?.data?.seed ?? input.seed,
+    endpoint,
+    modelName: "Wan Fun Control",
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
+
+async function runVoidVideoInpaintingUtility(req, res, { prompt, referenceVideoUrls, maskVideoUrls, selectedVideoModel }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "VOID Video Inpainting requires a connected source video." });
+  }
+
+  const options = req.body.voidVideoInpainting || {};
+  const endpoint = selectedVideoModel.id;
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    prompt,
+    mask_prompt: String(options.maskPrompt || "").trim(),
+    enable_pass2_refinement: Boolean(options.enablePass2Refinement),
+    negative_prompt: String(options.negativePrompt || ""),
+    num_inference_steps: clampInteger(options.numInferenceSteps, 1, 80, 30),
+    guidance_scale: clampNumber(options.guidanceScale, 0, 20, 1),
+    strength: clampNumber(options.strength, 0, 1, 1),
+    num_frames: clampInteger(options.numFrames, 69, 197, 85),
+    enable_safety_checker: options.enableSafetyChecker !== false
+  };
+  const seed = optionalInteger(options.seed);
+  const maskVideoUrl = firstLocalOutput(maskVideoUrls);
+  if (seed !== undefined) input.seed = seed;
+  if (maskVideoUrl) input.quad_mask_video_url = await uploadLocalOutputToFal(maskVideoUrl);
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no VOID video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "void-video-inpainting");
+  const cost = estimateFalVideoUtilityCost({
+    endpoint,
+    pricingBasis: "VOID video inpainting fal.ai request; local price estimate not configured"
+  });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: selectedVideoModel.displayName,
+    endpoint,
+    mode: "VOID video inpainting",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedVideoModel.displayName,
+      maskPrompt: input.mask_prompt,
+      maskVideoCount: maskVideoUrl ? 1 : 0,
+      enablePass2Refinement: input.enable_pass2_refinement,
+      numInferenceSteps: input.num_inference_steps,
+      guidanceScale: input.guidance_scale,
+      strength: input.strength,
+      numFrames: input.num_frames,
+      enableSafetyChecker: input.enable_safety_checker,
+      seed: result?.data?.seed ?? input.seed ?? null,
+      sourceVideoCount: 1
+    },
+    cost,
+    remoteVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedVideoModel.displayName,
+    seed: result?.data?.seed ?? input.seed,
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
+
+async function runBirefnetUtilityVideo(req, res, { referenceVideoUrls, selectedVideoModel }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "BiRefNet Video requires a connected video." });
+  }
+
+  const endpoint = selectedVideoModel.id;
+  const options = req.body.birefnet || {};
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    model: normalizeChoice(options.model, birefnetModelOptions, "General Use (Light)"),
+    operating_resolution: normalizeChoice(options.operatingResolution, birefnetResolutionOptions, "1024x1024"),
+    output_mask: Boolean(options.outputMask),
+    refine_foreground: options.refineForeground !== false,
+    video_output_type: normalizeChoice(options.videoOutputType, ["X264 (.mp4)", "VP9 (.webm)", "PRORES4444 (.mov)", "GIF (.gif)"], "X264 (.mp4)"),
+    video_quality: normalizeChoice(options.videoQuality, ["low", "medium", "high", "maximum"], "high"),
+    video_write_mode: normalizeChoice(options.videoWriteMode, ["fast", "balanced", "small"], "balanced")
+  };
+  if (input.operating_resolution === "2304x2304" && input.model !== "General Use (Dynamic)") {
+    input.operating_resolution = "2048x2048";
+  }
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video) || findFalMediaFile(result?.data, "video/");
+  const remoteMaskVideo = normalizeFalFile(result?.data?.mask_video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no BiRefNet video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "birefnet-video");
+  const videos = [
+    {
+      remoteVideo,
+      output,
+      label: "BiRefNet RGB"
+    }
+  ];
+
+  if (input.output_mask && remoteMaskVideo?.url && remoteMaskVideo.url !== remoteVideo.url) {
+    const maskOutput = await downloadVideo(remoteMaskVideo.url, "birefnet-mask-video");
+    videos.push({
+      remoteVideo: remoteMaskVideo,
+      output: maskOutput,
+      label: "BiRefNet Mask"
+    });
+  }
+
+  const cost = estimateFalVideoUtilityCost({
+    endpoint,
+    pricingBasis: "BiRefNet v2 fal.ai video background removal request; local price estimate not configured"
+  });
+  const outputBytes = videos.reduce((sum, item) => sum + item.output.bytes, 0);
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: selectedVideoModel.displayName,
+    endpoint,
+    mode: "BiRefNet video background removal",
+    prompt: "BiRefNet video background removal.",
+    submittedPrompt: "BiRefNet video background removal.",
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: input.model,
+      operatingResolution: input.operating_resolution,
+      outputMask: input.output_mask,
+      refineForeground: input.refine_foreground,
+      videoOutputType: input.video_output_type,
+      videoQuality: input.video_quality,
+      videoWriteMode: input.video_write_mode,
+      sourceVideoCount: 1
+    },
+    cost,
+    remoteVideo,
+    remoteMaskVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedVideoModel.displayName,
+    cost,
+    video: {
+      ...remoteVideo,
+      label: videos[0].label,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    },
+    videos: videos.map(({ remoteVideo, output, label }) => ({
+      ...remoteVideo,
+      label,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }))
+  });
+}
 
 app.post(
   "/api/generate",
@@ -727,6 +1940,61 @@ function safePathSegment(value) {
     .slice(0, 80) || "transfer";
 }
 
+function safeWorkflowFileName(value) {
+  const fileName = path.basename(String(value || ""));
+  if (!fileName.toLowerCase().endsWith(".json")) return "";
+  return fileName.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 120);
+}
+
+function uniqueWorkflowFileName(name, workflows) {
+  const usedNames = new Set(workflows.map((workflow) => workflow.fileName.toLowerCase()));
+  const baseName = safePathSegment(name || "workflow") || "workflow";
+  let fileName = `${baseName}.json`;
+  let suffix = 2;
+
+  while (usedNames.has(fileName.toLowerCase())) {
+    fileName = `${baseName}-${suffix}.json`;
+    suffix += 1;
+  }
+
+  return fileName;
+}
+
+async function readSavedWorkflows() {
+  await mkdir(savedWorkflowsDir, { recursive: true });
+  const entries = await readdir(savedWorkflowsDir, { withFileTypes: true });
+  const workflows = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json")) continue;
+
+    try {
+      const workflow = JSON.parse(await readFile(path.join(savedWorkflowsDir, entry.name), "utf8"));
+      workflows.push({
+        ...workflow,
+        id: workflow.id || entry.name,
+        name: workflow.name || path.basename(entry.name, ".json"),
+        fileName: entry.name,
+        graph: {
+          nodes: Array.isArray(workflow.graph?.nodes) ? workflow.graph.nodes : [],
+          edges: Array.isArray(workflow.graph?.edges) ? workflow.graph.edges : [],
+          groups: Array.isArray(workflow.graph?.groups) ? workflow.graph.groups : [],
+          viewport: workflow.graph?.viewport || { x: 0, y: 0, scale: 1 }
+        }
+      });
+    } catch {
+      // Ignore malformed workflow files instead of blocking the whole loader.
+    }
+  }
+
+  return workflows.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+}
+
+async function writeWorkflowFile(workflow) {
+  await mkdir(savedWorkflowsDir, { recursive: true });
+  await writeFile(path.join(savedWorkflowsDir, workflow.fileName), JSON.stringify(workflow, null, 2));
+}
+
 function uniqueReferenceName(value, usedNames) {
   const fallback = cleanReferenceName(value) || "Image";
   let name = fallback;
@@ -757,7 +2025,7 @@ async function downloadVideo(url, kind) {
   }
 
   const extension = path.extname(new URL(url).pathname) || ".mp4";
-  const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${kind}${extension}`;
+  const fileName = uniqueOutputFileName(kind, extension);
   const outputPath = path.join(outputsDir, fileName);
   const bytes = Buffer.from(await response.arrayBuffer());
   await writeFile(outputPath, bytes);
@@ -767,6 +2035,117 @@ async function downloadVideo(url, kind) {
     publicPath: `/outputs/${fileName}`,
     bytes: bytes.length
   };
+}
+
+async function downloadImage(url, kind, mimeTypeHint = "") {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Could not download generated image: ${response.status} ${response.statusText}`);
+  }
+
+  const mimeType = normalizeMimeType(mimeTypeHint || response.headers.get("content-type") || "image/png");
+  const extension = imageExtensionForUrl(url, mimeType);
+  const fileName = uniqueOutputFileName(kind, extension);
+  const outputPath = path.join(outputsDir, fileName);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await writeFile(outputPath, bytes);
+
+  return {
+    fileName,
+    publicPath: `/outputs/${fileName}`,
+    bytes: bytes.length,
+    mimeType
+  };
+}
+
+function uniqueOutputFileName(kind, extension) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeKind = String(kind || "output").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "output";
+  const safeExtension = String(extension || "").startsWith(".") ? extension : `.${extension || "bin"}`;
+  return `${timestamp}-${safeKind}-${randomUUID().slice(0, 8)}${safeExtension}`;
+}
+
+function imageExtensionForUrl(url, mimeType) {
+  const extension = path.extname(new URL(url).pathname).toLowerCase();
+  if ([".jpg", ".jpeg", ".png", ".webp"].includes(extension)) return extension;
+  return extensionForMime(mimeType);
+}
+
+function normalizeMimeType(value) {
+  return String(value || "image/png").split(";")[0].trim().toLowerCase() || "image/png";
+}
+
+function normalizeFalFile(value) {
+  if (!value) return null;
+  if (typeof value === "string") return { url: value };
+  if (typeof value.url === "string") return value;
+  if (typeof value.file_url === "string") return { ...value, url: value.file_url };
+  if (typeof value.image_url === "string") return { ...value, url: value.image_url };
+  if (typeof value.download_url === "string") return { ...value, url: value.download_url };
+  if (typeof value.public_url === "string") return { ...value, url: value.public_url };
+  return null;
+}
+
+function firstFalImageResult(data) {
+  const knownResult =
+    normalizeFalFile(data?.image) ||
+    normalizeFalFile(data?.output_image) ||
+    normalizeFalFile(data?.segmented_image) ||
+    normalizeFalFile(data?.masked_image) ||
+    normalizeFalFile(data?.mask_image) ||
+    normalizeFalFile(data?.masks?.[0]) ||
+    normalizeFalFile(data?.mask) ||
+    normalizeFalFile(data?.images?.[0]) ||
+    normalizeFalFile(data?.outputs?.[0]) ||
+    normalizeFalFile(data?.result);
+
+  return knownResult || findFalMediaFile(data, "image/");
+}
+
+function falImageResults(data) {
+  const candidates = [];
+  if (Array.isArray(data?.images)) candidates.push(...data.images);
+  if (Array.isArray(data?.outputs)) candidates.push(...data.outputs);
+  if (data?.image) candidates.push(data.image);
+  if (data?.output_image) candidates.push(data.output_image);
+
+  const normalized = candidates.map(normalizeFalFile).filter((file) => file?.url);
+  if (normalized.length) return normalized;
+
+  const fallback = firstFalImageResult(data);
+  return fallback?.url ? [fallback] : [];
+}
+
+function findFalMediaFile(value, mimePrefix, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return null;
+  seen.add(value);
+
+  const file = normalizeFalFile(value);
+  if (file && falFileMatchesMedia(file, mimePrefix)) return file;
+
+  for (const child of Object.values(value)) {
+    const found = findFalMediaFile(child, mimePrefix, seen);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function falFileMatchesMedia(file, mimePrefix) {
+  const contentType = String(file.content_type || file.mimeType || file.mime_type || "").toLowerCase();
+  if (contentType.startsWith(mimePrefix)) return true;
+
+  if (mimePrefix === "image/") {
+    const fileName = String(file.file_name || file.fileName || file.name || file.url || "").toLowerCase();
+    return [".jpg", ".jpeg", ".png", ".webp"].some((extension) => fileName.includes(extension));
+  }
+
+  if (mimePrefix === "video/") {
+    const fileName = String(file.file_name || file.fileName || file.name || file.url || "").toLowerCase();
+    return [".mp4", ".mov", ".webm", ".gif"].some((extension) => fileName.includes(extension));
+  }
+
+  return false;
 }
 
 async function readHistory() {
@@ -783,13 +2162,64 @@ async function readHistory() {
 }
 
 async function appendHistory(item) {
-  const history = await readHistory();
-  history.unshift(item);
-  await writeHistory(history.slice(0, 500));
+  const write = historyWriteQueue.then(async () => {
+    const history = await readHistory();
+    history.unshift(item);
+    await writeHistory(history.slice(0, 500));
+  });
+  historyWriteQueue = write.catch(() => {});
+  return write;
 }
 
 async function writeHistory(history) {
   await writeFile(historyPath, JSON.stringify(history, null, 2));
+}
+
+function errorStatusCode(error) {
+  const status = Number(error?.statusCode || error?.status || error?.response?.status);
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500;
+}
+
+function publicErrorMessage(error, fallback) {
+  const candidates = [
+    error?.message,
+    error?.body?.detail,
+    error?.body?.message,
+    error?.body?.error,
+    error?.data?.detail,
+    error?.data?.message,
+    error?.data?.error,
+    error?.response?.data?.detail,
+    error?.response?.data?.message,
+    error?.response?.data?.error,
+    error?.cause?.message,
+    typeof error === "string" ? error : ""
+  ];
+
+  for (const candidate of candidates) {
+    const message = publicErrorDetail(candidate);
+    if (message) return message;
+  }
+
+  return fallback;
+}
+
+function publicErrorDetail(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) return value.map(publicErrorDetail).filter(Boolean).join(" ");
+  if (typeof value === "object") {
+    const direct = publicErrorDetail(value.msg || value.message || value.detail || value.error);
+    if (direct) return direct;
+
+    try {
+      return JSON.stringify(value).slice(0, 700);
+    } catch {
+      return "";
+    }
+  }
+
+  return String(value).trim();
 }
 
 function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind }) {
@@ -806,8 +2236,122 @@ function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind
     unit: "second",
     mediaType: "video",
     resolution,
-    pricingBasis: "Seedance 2.0 documented 720p per-second fal.ai estimate",
+    pricingBasis: "Seedance 2.0 per-second fal.ai pricing estimate",
+    pricingSource: "configured-pricing-v1",
     routeKind
+  };
+}
+
+function estimateWanFunControlCost({ endpoint, matchInputNumFrames, numFrames, matchInputFps, fps }) {
+  const billingFrames = matchInputNumFrames ? 81 : numFrames;
+  const seconds = billingFrames / 16;
+  const unitRateUsd = 0.1;
+
+  return {
+    amountUsd: roundCurrency(seconds * unitRateUsd),
+    currency: "USD",
+    unitRateUsd,
+    units: seconds,
+    unit: "video second",
+    mediaType: "video",
+    pricingBasis: "fal.ai Wan Fun Control per-video-second pricing estimate at 16 fps",
+    pricingSource: "fal-model-page-2026-05-11",
+    endpoint,
+    matchInputNumFrames,
+    billingFrames,
+    numFrames: numFrames || null,
+    matchInputFps,
+    fps: fps || null
+  };
+}
+
+function estimateAuroraCost({ endpoint, resolution, duration }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: null,
+    units: duration || null,
+    unit: "request",
+    mediaType: "video",
+    resolution,
+    pricingBasis: "Creatify Aurora fal.ai request; local price estimate not configured",
+    pricingSource: "fal-model-page-2026-05-12",
+    endpoint
+  };
+}
+
+function estimateSam3ImageCost({ endpoint }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: null,
+    units: 1,
+    unit: "request",
+    mediaType: "image",
+    pricingBasis: "SAM 3 image segmentation fal.ai request; local price estimate not configured",
+    pricingSource: "fal-model-page-2026-05-12",
+    endpoint
+  };
+}
+
+function estimateSam3VideoCost({ endpoint }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: 0.005,
+    units: null,
+    unit: "16 frames",
+    mediaType: "video",
+    pricingBasis: "SAM 3 video segmentation fal.ai pricing estimate at $0.005 per 16 frames; local frame count unavailable",
+    pricingSource: "fal-model-page-2026-05-12",
+    endpoint
+  };
+}
+
+function estimateFalImageUtilityCost({ endpoint, mediaType, pricingBasis }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: null,
+    units: 1,
+    unit: "request",
+    mediaType,
+    pricingBasis,
+    pricingSource: "fal-model-page-2026-05-13",
+    endpoint
+  };
+}
+
+function estimateFalVideoUtilityCost({ endpoint, pricingBasis }) {
+  return {
+    amountUsd: null,
+    currency: "USD",
+    unitRateUsd: null,
+    units: 1,
+    unit: "request",
+    mediaType: "video",
+    pricingBasis,
+    pricingSource: "fal-model-page-2026-05-15",
+    endpoint
+  };
+}
+
+function estimateQwenCameraEditCost({ endpoint, image }) {
+  const width = Number(image?.width || 0);
+  const height = Number(image?.height || 0);
+  const megapixels = width > 0 && height > 0 ? (width * height) / 1000000 : null;
+  const unitRateUsd = 0.035;
+
+  return {
+    amountUsd: megapixels ? roundCurrency(megapixels * unitRateUsd) : null,
+    currency: "USD",
+    unitRateUsd,
+    units: megapixels ? roundCurrency(megapixels) : null,
+    unit: "megapixel",
+    mediaType: "image",
+    pricingBasis: "Qwen Image Edit 2511 Multiple Angles fal.ai per-megapixel estimate",
+    pricingSource: "fal-model-page-2026-05-12",
+    endpoint
   };
 }
 
@@ -842,6 +2386,25 @@ function estimateOpenAiImage2Cost({ resolution, size, quality }) {
   };
 }
 
+function estimateTextProcessingCost({ provider, imageInputs = [], videoInputs = [] }) {
+  const normalizedProvider = String(provider || "").toLowerCase();
+  const textRequestCost = normalizedProvider === "fal" ? falTextRequestCost : 0;
+  const imageHelperCost = normalizedProvider === "fal" && imageInputs.length ? falVisionTextUnitCost : 0;
+  const videoHelperCost = normalizedProvider === "fal" && videoInputs.length ? falVideoTextUnitCost : 0;
+  const amountUsd = roundCurrency(textRequestCost + imageHelperCost + videoHelperCost);
+
+  return {
+    amountUsd,
+    currency: "USD",
+    unitRateUsd: textRequestCost,
+    units: 1,
+    unit: "request",
+    mediaType: "text",
+    pricingBasis: normalizedProvider === "fal" ? "fal.ai any-llm request estimate plus media helper calls" : "No local token estimate for OpenAI text",
+    pricingSource: "configured-pricing-v1"
+  };
+}
+
 function durationToSeconds(duration) {
   if (duration === "auto") return 15;
   const match = String(duration || "15").match(/\d+/);
@@ -866,6 +2429,206 @@ function nodeFromBody(body) {
   const title = String(body.nodeTitle || "").trim();
   if (!id && !title) return undefined;
   return { id, title };
+}
+
+function normalizedTextInputs(items) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item) => ({
+      label: String(item?.label || "Text input").trim(),
+      text: String(item?.text || "").trim()
+    }))
+    .filter((item) => item.text)
+    .slice(0, 8);
+}
+
+function normalizedMediaInputs(items, mediaType) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item) => ({
+      label: String(item?.label || `${mediaType} input`).trim(),
+      url: String(item?.url || "").trim(),
+      type: mediaType
+    }))
+    .filter((item) => isLocalAssetUrl(item.url))
+    .slice(0, 6);
+}
+
+function textInputContext(textInputs) {
+  return textInputs.map((item, index) => `Text input ${index + 1} (${item.label}):\n${item.text}`).join("\n\n");
+}
+
+function buildTextProcessingPrompt({ text, textInputs, imageDescriptions = [], videoDescriptions = [] }) {
+  return [
+    textProcessingInstructions(),
+    text ? `Original prompt:\n${text}` : "",
+    textInputContext(textInputs),
+    imageDescriptions.length ? `Image context:\n${imageDescriptions.join("\n\n")}` : "",
+    videoDescriptions.length ? `Video context:\n${videoDescriptions.join("\n\n")}` : "",
+    "Return only the final processed prompt text."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function processTextWithFal({ text, textInputs, imageInputs, videoInputs }) {
+  if (!process.env.FAL_KEY) {
+    throw new Error("Missing FAL_KEY in .env.");
+  }
+
+  const model = falTextModel;
+  const imageDescriptions = await describeImageInputs(imageInputs);
+  const videoDescriptions = await describeVideoInputs(videoInputs);
+  const prompt = buildTextProcessingPrompt({ text, textInputs, imageDescriptions, videoDescriptions });
+  const data = await fal.subscribe("fal-ai/any-llm", {
+    input: {
+      model,
+      prompt
+    },
+    logs: true
+  });
+  const outputText = extractFalText(data).trim();
+
+  if (!outputText) {
+    throw new Error("fal returned no text.");
+  }
+
+  return {
+    text: outputText,
+    model,
+    provider: "fal",
+    endpoint: "fal-ai/any-llm",
+    submittedPrompt: prompt,
+    usage: data?.usage || data?.metrics || null
+  };
+}
+
+async function processTextWithOpenAi({ text, textInputs, imageInputs, videoInputs }) {
+  if (!openAiTextApiKey) {
+    throw new Error("Missing OPENAI_TEXT_API_KEY in .env.");
+  }
+
+  const model = openAiTextModel;
+  const prompt = buildTextProcessingPrompt({
+    text,
+    textInputs,
+    imageDescriptions: imageInputs.map((item, index) => `Image ${index + 1} (${item.label}): ${item.url}`),
+    videoDescriptions: videoInputs.map((item, index) => `Video ${index + 1} (${item.label}): ${item.url}`)
+  });
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${openAiTextApiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      instructions: textProcessingInstructions(),
+      input: prompt
+    })
+  });
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data?.error?.message || "Text processing failed.");
+  }
+
+  const outputText = extractOpenAiResponseText(data).trim();
+  if (!outputText) {
+    throw new Error("OpenAI returned no text.");
+  }
+
+  return {
+    text: outputText,
+    model,
+    provider: "OpenAI",
+    endpoint: model,
+    submittedPrompt: prompt,
+    usage: data.usage || null
+  };
+}
+
+function textProcessingInstructions() {
+  return "Process the available text, image, and video context for use in a creative node workflow. Improve clarity, specificity, and usefulness while preserving the user's intent.";
+}
+
+async function describeImageInputs(imageInputs) {
+  if (!imageInputs.length) return [];
+
+  const imageUrls = await Promise.all(imageInputs.map((item) => localAssetToFalUrl(item.url)));
+  const data = await fal.subscribe("openrouter/router/vision", {
+    input: {
+      image_urls: imageUrls,
+      prompt: "Describe these images as concise visual prompt context. Focus on subject, setting, composition, camera, lighting, palette, mood, materials, and any important details.",
+      system_prompt: "Return only useful prompt context. Do not use markdown.",
+      model: falVisionTextModel
+    },
+    logs: true
+  });
+  const description = extractFalText(data).trim();
+  return description ? [`Connected images: ${description}`] : [];
+}
+
+async function describeVideoInputs(videoInputs) {
+  if (!videoInputs.length) return [];
+
+  const videoUrls = await Promise.all(videoInputs.map((item) => localAssetToFalUrl(item.url)));
+  const data = await fal.subscribe("openrouter/router/video", {
+    input: {
+      video_urls: videoUrls,
+      prompt: "Describe these videos as concise visual prompt context. Focus on subjects, actions, setting, camera movement, lighting, style, mood, and any useful continuity details.",
+      system_prompt: "Return only useful prompt context. Do not use markdown.",
+      model: falVideoTextModel
+    },
+    logs: true
+  });
+  const description = extractFalText(data).trim();
+  return description ? [`Connected videos: ${description}`] : [];
+}
+
+async function localAssetToFalUrl(publicPath) {
+  const asset = await readLocalAsset(publicPath);
+  return fal.storage.upload(
+    new File([asset.buffer], asset.fileName, {
+      type: asset.mimeType || "application/octet-stream"
+    })
+  );
+}
+
+function extractOpenAiResponseText(response) {
+  if (typeof response?.output_text === "string") return response.output_text;
+
+  return (response?.output || [])
+    .flatMap((item) => item?.content || [])
+    .map((content) => content?.text || "")
+    .filter(Boolean)
+    .join("\n");
+}
+
+function extractFalText(data) {
+  if (typeof data === "string") return data;
+  if (typeof data?.data?.output === "string") return data.data.output;
+  if (typeof data?.data?.text === "string") return data.data.text;
+  if (typeof data?.data?.response === "string") return data.data.response;
+  if (typeof data?.data?.content === "string") return data.data.content;
+  if (typeof data?.data?.message?.content === "string") return data.data.message.content;
+  if (typeof data?.data?.choices?.[0]?.message?.content === "string") return data.data.choices[0].message.content;
+  if (typeof data?.data?.choices?.[0]?.text === "string") return data.data.choices[0].text;
+  if (typeof data?.output === "string") return data.output;
+  if (typeof data?.text === "string") return data.text;
+  if (typeof data?.response === "string") return data.response;
+  if (typeof data?.content === "string") return data.content;
+  if (typeof data?.message?.content === "string") return data.message.content;
+  if (typeof data?.choices?.[0]?.message?.content === "string") return data.choices[0].message.content;
+  if (typeof data?.choices?.[0]?.text === "string") return data.choices[0].text;
+
+  const content = data?.output?.[0]?.content?.[0];
+  if (typeof content?.text === "string") return content.text;
+
+  const nestedContent = data?.data?.output?.[0]?.content?.[0];
+  if (typeof nestedContent?.text === "string") return nestedContent.text;
+
+  return "";
 }
 
 function routeKindLabel(routeKind, speed) {
@@ -894,6 +2657,22 @@ async function writeNodeProjects(projects) {
 
 function resolveImageModel(model) {
   const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("image")) {
+    if (!sam3SegmentationModelsEnabled) {
+      return {
+        provider: "disabled",
+        displayName: "SAM 3 Image",
+        id: "fal-ai/sam-3/image"
+      };
+    }
+
+    return {
+      provider: "fal-sam3-image",
+      displayName: "SAM 3 Image",
+      id: "fal-ai/sam-3/image"
+    };
+  }
+
   if (normalized.includes("openai") || normalized.includes("gpt-image-2") || normalized.includes("image 2")) {
     return {
       provider: "openai",
@@ -909,6 +2688,132 @@ function resolveImageModel(model) {
   };
 }
 
+function resolveUtilityImageModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("image")) {
+    return {
+      provider: "fal-sam3-image",
+      displayName: "SAM 3 Image",
+      id: "fal-ai/sam-3/image"
+    };
+  }
+
+  if (normalized.includes("depth") || normalized.includes("anything")) {
+    return {
+      provider: "fal-depth-anything",
+      displayName: "Depth Anything",
+      id: "fal-ai/image-preprocessors/depth-anything/v2"
+    };
+  }
+
+  if (normalized.includes("patina")) {
+    return {
+      provider: "fal-patina",
+      displayName: "Patina",
+      id: "fal-ai/patina"
+    };
+  }
+
+  if (normalized.includes("birefnet")) {
+    return {
+      provider: "fal-birefnet-image",
+      displayName: "BiRefNet Image",
+      id: "fal-ai/birefnet/v2"
+    };
+  }
+
+  return {
+    provider: "fal-dwpose",
+    displayName: "DWPose",
+    id: "fal-ai/dwpose"
+  };
+}
+
+function resolveUtilityVideoModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("video")) {
+    return {
+      provider: "fal-sam3-video",
+      displayName: "SAM 3 Video",
+      id: "fal-ai/sam-3/video",
+      requiresPrompt: true
+    };
+  }
+
+  if (normalized.includes("birefnet")) {
+    return {
+      provider: "fal-birefnet-video",
+      displayName: "BiRefNet Video",
+      id: "fal-ai/birefnet/v2/video",
+      requiresPrompt: false
+    };
+  }
+
+  if (normalized.includes("void") || normalized.includes("inpaint")) {
+    return {
+      provider: "fal-void-video-inpainting",
+      displayName: "VOID Video Inpainting",
+      id: "fal-ai/void-video-inpainting",
+      requiresPrompt: true
+    };
+  }
+
+  return {
+    provider: "fal-wan-fun-control",
+    displayName: "Wan Fun Control",
+    id: "fal-ai/wan-fun-control",
+    speed: "wan",
+    requiresPrompt: true
+  };
+}
+
+function resolveVideoModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("sam") && normalized.includes("video")) {
+    if (!sam3SegmentationModelsEnabled) {
+      return {
+        provider: "disabled",
+        displayName: "SAM 3 Video",
+        id: "fal-ai/sam-3/video",
+        speed: "sam3"
+      };
+    }
+
+    return {
+      provider: "fal-sam3-video",
+      displayName: "SAM 3 Video",
+      id: "fal-ai/sam-3/video",
+      speed: "sam3"
+    };
+  }
+
+  if (normalized.includes("aurora") || normalized.includes("creatify")) {
+    return {
+      provider: "fal-aurora",
+      displayName: "Creatify Aurora",
+      id: "fal-ai/creatify/aurora",
+      speed: "aurora"
+    };
+  }
+
+  if (normalized.includes("wan")) {
+    return {
+      provider: "fal-wan-fun-control",
+      displayName: "Wan Fun Control",
+      id: "fal-ai/wan-fun-control",
+      speed: "wan"
+    };
+  }
+
+  const speed = normalized.includes("fast") ? "fast" : "standard";
+  return {
+    provider: "fal-seedance",
+    displayName: speed === "fast" ? "Seedance 2.0 Fast" : "Seedance 2.0",
+    id: `bytedance/seedance-2.0/${speed === "fast" ? "fast/" : ""}`,
+    speed
+  };
+}
+
 function normalizeGeminiImageAspectRatio(value) {
   const normalized = String(value || "21:9").match(/\d+:\d+/)?.[0] || "21:9";
   return normalizeChoice(normalized, ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], "21:9");
@@ -917,6 +2822,87 @@ function normalizeGeminiImageAspectRatio(value) {
 function normalizeGeminiImageSize(value) {
   const normalized = String(value || "2K").toUpperCase();
   return normalizeChoice(normalized, ["1K", "2K", "4K"], "2K");
+}
+
+async function generateGeminiImageWithRetries({ model, parts, imageConfig }) {
+  const maxAttempts = 3;
+  let lastText = "";
+  let lastRaw = null;
+  let lastFinishReason = "";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": process.env.GOOGLE_API_KEY
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts
+          }
+        ],
+        generationConfig: {
+          responseModalities: ["TEXT", "IMAGE"],
+          imageConfig
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw httpError(response.status, data?.error?.message || "Image generation failed.", { raw: data });
+    }
+
+    const parsed = extractGeminiImageData(data);
+    if (parsed.inlineData?.data) {
+      return {
+        ...parsed,
+        attempts: attempt
+      };
+    }
+
+    lastText = parsed.text;
+    lastRaw = data;
+    lastFinishReason = parsed.finishReason;
+
+    if (attempt < maxAttempts) {
+      await delay(900 * attempt);
+    }
+  }
+
+  const finishReason = lastFinishReason ? ` Finish reason: ${lastFinishReason}.` : "";
+  throw httpError(502, `Gemini returned no image data after ${maxAttempts} attempts.${finishReason}`, {
+    text: lastText,
+    raw: lastRaw
+  });
+}
+
+function extractGeminiImageData(data) {
+  const candidate = data?.candidates?.[0] || {};
+  const responseParts = candidate?.content?.parts || [];
+  const text = responseParts.find((part) => part.text)?.text || "";
+  const imagePart = responseParts.find((part) => part.inlineData?.data || part.inline_data?.data);
+  const inlineData = imagePart?.inlineData || imagePart?.inline_data;
+
+  return {
+    text,
+    inlineData,
+    finishReason: candidate.finishReason || candidate.finish_reason || "",
+    raw: data
+  };
+}
+
+function httpError(status, message, extra = {}) {
+  return Object.assign(new Error(message), {
+    status,
+    ...extra
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function generateOpenAiImage({ prompt, imagePromptUrls, imagePromptLabels, aspectRatio, resolution }) {
@@ -942,7 +2928,7 @@ async function generateOpenAiImage({ prompt, imagePromptUrls, imagePromptLabels,
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${openAiImageApiKey}`,
       ...requestOptions.headers
     },
     body: requestOptions.body
@@ -1061,6 +3047,51 @@ function normalizeDuration(value) {
 function normalizeAspectRatio(value) {
   const normalized = String(value || "16:9").match(/\d+:\d+/)?.[0] || "16:9";
   return normalizeChoice(normalized, ["auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"], "16:9");
+}
+
+function qwenCameraPromptLabel(input) {
+  return [
+    `azimuth ${Math.round(input.horizontal_angle)} degrees`,
+    `elevation ${Math.round(input.vertical_angle)} degrees`,
+    `zoom ${Math.round(input.zoom * 10) / 10}`,
+    input.additional_prompt
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function clampInteger(value, min, max, fallback) {
+  const number = Math.round(Number(value));
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function optionalInteger(value) {
+  if (value === "" || value === null || value === undefined) return undefined;
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function normalizePatinaMaps(value) {
+  const values = Array.isArray(value) ? value : [];
+  const maps = [...new Set(values.map(normalizePatinaMapId).filter(Boolean))];
+  return maps.length ? maps : ["basecolor", "normal", "roughness", "metalness", "height"];
+}
+
+function normalizePatinaMapId(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["basecolor", "normal", "roughness", "metalness", "height"].includes(normalized) ? normalized : "";
+}
+
+function formatPatinaMapLabel(value) {
+  if (value === "basecolor") return "Basecolor";
+  return String(value || "Map").replace(/^\w/, (letter) => letter.toUpperCase());
 }
 
 function firstLocalOutput(value) {

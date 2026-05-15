@@ -352,7 +352,7 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${workspaceMode === "nodes" ? "node-app-shell" : ""}`}>
       <div className="topbar">
         <div className="brand-lockup" aria-label="NewtNode">
           <img src="/newtnode-logo.png" alt="NewtNode" />
@@ -581,11 +581,13 @@ function App() {
 
           <Gallery history={videoHistory} onRemove={removeHistoryItem} />
         </>
-      ) : workspaceMode === "nodes" ? (
-        <NodeEditor />
-      ) : (
+      ) : workspaceMode === "stats" ? (
         <StatsDashboard />
-      )}
+      ) : null}
+
+      <div className={`nodes-tab-keepalive ${workspaceMode === "nodes" ? "active" : ""}`} aria-hidden={workspaceMode !== "nodes"}>
+        <NodeEditor active={workspaceMode === "nodes"} />
+      </div>
     </main>
   );
 }
