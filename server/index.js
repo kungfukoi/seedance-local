@@ -22,14 +22,25 @@ const historyPath = path.join(dataDir, "history.json");
 const nodeProjectsPath = path.join(dataDir, "node-projects.json");
 let historyWriteQueue = Promise.resolve();
 const port = Number(process.env.PORT || 3333);
-const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_PER_SECOND || 0.014);
-const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.0112);
-const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.134);
-const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.24);
+const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_PER_SECOND || 0.3034);
+const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.2419);
+const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.15);
+const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.3);
 const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 0.053);
 const falTextRequestCost = Number(process.env.FAL_TEXT_REQUEST_COST || 0.001);
 const falVisionTextUnitCost = Number(process.env.FAL_VISION_TEXT_UNIT_COST || 0.01);
 const falVideoTextUnitCost = Number(process.env.FAL_VIDEO_TEXT_UNIT_COST || 0.01);
+const wanFunControlCostPerSecond = 0.1;
+const voidVideoInpaintingBaseCost = 0.05;
+const voidVideoInpaintingPass2Cost = 0.05;
+const voidVideoInpaintingSam3QuadMaskCost = 0.05;
+const sam3ImageCostPerRequest = 0.005;
+const sam3VideoCostPer16Frames = 0.005;
+const aurora480pCostPerSecond = 0.07;
+const aurora720pCostPerSecond = 0.14;
+const dwposeCostPerComputeSecond = 0.0006;
+const patinaBaseCost = 0.01;
+const patinaMapCostPerMegapixel = 0.01;
 const falUtilityImageTimeoutMs = Math.max(30000, Number(process.env.FAL_UTILITY_IMAGE_TIMEOUT_MS) || 180000);
 const openAiTextModel = process.env.OPENAI_TEXT_MODEL || "gpt-5.5";
 const openAiTextApiKey = process.env.OPENAI_TEXT_API_KEY || process.env.OPENAI_API_KEY;
@@ -119,6 +130,48 @@ app.get("/api/stats", async (_req, res) => {
         falVisionUnitCost: falVisionTextUnitCost,
         falVideoUnitCost: falVideoTextUnitCost,
         currency: "USD"
+      },
+      utility: {
+        wanFunControl: {
+          costPerSecond: wanFunControlCostPerSecond,
+          currency: "USD"
+        },
+        voidVideoInpainting: {
+          baseCost: voidVideoInpaintingBaseCost,
+          pass2Cost: voidVideoInpaintingPass2Cost,
+          sam3QuadMaskCost: voidVideoInpaintingSam3QuadMaskCost,
+          currency: "USD"
+        },
+        sam3Image: {
+          costPerRequest: sam3ImageCostPerRequest,
+          currency: "USD"
+        },
+        sam3Video: {
+          costPer16Frames: sam3VideoCostPer16Frames,
+          currency: "USD"
+        },
+        aurora: {
+          costPerSecond480p: aurora480pCostPerSecond,
+          costPerSecond720p: aurora720pCostPerSecond,
+          currency: "USD"
+        },
+        dwpose: {
+          costPerComputeSecond: dwposeCostPerComputeSecond,
+          currency: "USD"
+        },
+        depthAnything: {
+          costPerComputeSecond: 0,
+          currency: "USD"
+        },
+        birefnet: {
+          costPerComputeSecond: 0,
+          currency: "USD"
+        },
+        patina: {
+          baseCost: patinaBaseCost,
+          mapCostPerMegapixel: patinaMapCostPerMegapixel,
+          currency: "USD"
+        }
       }
     }
   });
@@ -285,7 +338,8 @@ app.post("/api/node/process-text", async (req, res) => {
     }
 
     const result = textLlmProvider === "openai" ? await processTextWithOpenAi({ text, textInputs, imageInputs, videoInputs }) : await processTextWithFal({ text, textInputs, imageInputs, videoInputs });
-    const cost = estimateTextProcessingCost({ provider: result.provider, imageInputs, videoInputs });
+    const cost = estimateTextProcessingCost({ provider: result.provider, usage: result.usage, helperUsages: result.helperUsages, imageInputs, videoInputs });
+    const usageRecord = result.usage || result.helperUsages?.length ? { request: result.usage || null, helpers: result.helperUsages || [] } : null;
 
     await appendHistory({
       id: randomUUID(),
@@ -308,7 +362,7 @@ app.post("/api/node/process-text", async (req, res) => {
       },
       cost,
       text: result.text,
-      usage: result.usage || null
+      usage: usageRecord
     });
 
     res.json({
@@ -316,7 +370,7 @@ app.post("/api/node/process-text", async (req, res) => {
       model: result.model,
       provider: result.provider,
       cost,
-      usage: result.usage || null
+      usage: usageRecord
     });
   } catch (error) {
     console.error(error);
@@ -694,7 +748,11 @@ async function runDwposeUtilityImage(req, res, { imageUrl, selectedModel }) {
   const cost = estimateFalImageUtilityCost({
     endpoint,
     mediaType: "image",
-    pricingBasis: "DWPose fal.ai image utility request; local price estimate not configured"
+    amountUsd: costFromTiming(result, dwposeCostPerComputeSecond),
+    unitRateUsd: dwposeCostPerComputeSecond,
+    units: falTimingSeconds(result),
+    unit: "compute second",
+    pricingBasis: "DWPose fal.ai image utility estimate at $0.0006 per compute second"
   });
   const text = `DWPose ${drawMode.replace(/-/g, " ")} map.`;
 
@@ -765,7 +823,11 @@ async function runDepthAnythingUtilityImage(req, res, { imageUrl, selectedModel 
   const cost = estimateFalImageUtilityCost({
     endpoint,
     mediaType: "image",
-    pricingBasis: "Depth Anything v2 fal.ai image preprocessor request; local price estimate not configured"
+    amountUsd: 0,
+    unitRateUsd: 0,
+    units: falTimingSeconds(result) || 0,
+    unit: "compute second",
+    pricingBasis: "Depth Anything v2 fal.ai image preprocessor listed at $0 per compute second"
   });
   const text = "Depth Anything v2 map.";
 
@@ -849,11 +911,7 @@ async function runPatinaUtilityImage(req, res, { imageUrl, selectedModel }) {
     });
   }
 
-  const cost = estimateFalImageUtilityCost({
-    endpoint,
-    mediaType: "image",
-    pricingBasis: "Patina fal.ai image-to-PBR-maps request; local price estimate not configured"
-  });
+  const cost = estimatePatinaCost({ endpoint, maps, image: remoteImages[0] });
   const text = `Patina ${outputs.map((item) => formatPatinaMapLabel(item.mapType)).join(", ")} maps.`;
   const outputBytes = outputs.reduce((sum, item) => sum + item.output.bytes, 0);
 
@@ -953,7 +1011,11 @@ async function runBirefnetUtilityImage(req, res, { imageUrl, selectedModel }) {
   const cost = estimateFalImageUtilityCost({
     endpoint,
     mediaType: "image",
-    pricingBasis: "BiRefNet v2 fal.ai image background removal request; local price estimate not configured"
+    amountUsd: 0,
+    unitRateUsd: 0,
+    units: falTimingSeconds(result) || 0,
+    unit: "compute second",
+    pricingBasis: "BiRefNet v2 fal.ai image background removal listed at $0 per compute second"
   });
   const text = input.mask_only ? "BiRefNet segmentation mask." : "BiRefNet background removed image.";
   const outputBytes = images.reduce((sum, item) => sum + item.output.bytes, 0);
@@ -1044,6 +1106,13 @@ app.post("/api/node/utility-video", async (req, res) => {
 
     if (selectedVideoModel.provider === "fal-birefnet-video") {
       return runBirefnetUtilityVideo(req, res, {
+        referenceVideoUrls,
+        selectedVideoModel
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-rife-video") {
+      return runRifeVideoInterpolation(req, res, {
         referenceVideoUrls,
         selectedVideoModel
       });
@@ -1321,7 +1390,7 @@ async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }
   }
 
   const output = await downloadVideo(remoteVideo.url, "sam-3-video-segmentation");
-  const cost = estimateSam3VideoCost({ endpoint });
+  const cost = estimateSam3VideoCost({ endpoint, frames: videoFrameCount(remoteVideo, result?.data) });
 
   await appendHistory({
     id: result.requestId || randomUUID(),
@@ -1553,9 +1622,10 @@ async function runVoidVideoInpaintingUtility(req, res, { prompt, referenceVideoU
   }
 
   const output = await downloadVideo(remoteVideo.url, "void-video-inpainting");
-  const cost = estimateFalVideoUtilityCost({
+  const cost = estimateVoidVideoInpaintingCost({
     endpoint,
-    pricingBasis: "VOID video inpainting fal.ai request; local price estimate not configured"
+    enablePass2Refinement: input.enable_pass2_refinement,
+    hasMaskVideo: Boolean(maskVideoUrl)
   });
 
   await appendHistory({
@@ -1654,7 +1724,11 @@ async function runBirefnetUtilityVideo(req, res, { referenceVideoUrls, selectedV
 
   const cost = estimateFalVideoUtilityCost({
     endpoint,
-    pricingBasis: "BiRefNet v2 fal.ai video background removal request; local price estimate not configured"
+    amountUsd: 0,
+    unitRateUsd: 0,
+    units: falTimingSeconds(result) || 0,
+    unit: "compute second",
+    pricingBasis: "BiRefNet v2 fal.ai video background removal listed at $0 per compute second"
   });
   const outputBytes = videos.reduce((sum, item) => sum + item.output.bytes, 0);
 
@@ -1705,6 +1779,79 @@ async function runBirefnetUtilityVideo(req, res, { referenceVideoUrls, selectedV
       localUrl: output.publicPath,
       fileName: output.fileName
     }))
+  });
+}
+
+async function runRifeVideoInterpolation(req, res, { referenceVideoUrls, selectedVideoModel }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "RIFE Video requires a connected video." });
+  }
+
+  const endpoint = selectedVideoModel.id;
+  const options = req.body.rifeVideo || {};
+  const useCalculatedFps = options.useCalculatedFps !== false;
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    num_frames: clampInteger(options.numFrames, 1, 8, 1),
+    use_scene_detection: options.useSceneDetection !== false,
+    use_calculated_fps: useCalculatedFps,
+    loop: Boolean(options.loop)
+  };
+  if (!useCalculatedFps) input.fps = clampInteger(options.fps, 1, 120, 24);
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no RIFE video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "rife-video-interpolation");
+  const cost = estimateFalVideoUtilityCost({
+    endpoint,
+    pricingBasis: "RIFE video interpolation fal.ai request; local price estimate not configured"
+  });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: selectedVideoModel.displayName,
+    endpoint,
+    mode: "RIFE video frame interpolation",
+    prompt: `RIFE interpolation: ${input.num_frames} in-between frame${input.num_frames === 1 ? "" : "s"}.`,
+    submittedPrompt: "",
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedVideoModel.displayName,
+      numFrames: input.num_frames,
+      useSceneDetection: input.use_scene_detection,
+      useCalculatedFps: input.use_calculated_fps,
+      fps: input.fps || null,
+      loop: input.loop,
+      sourceVideoCount: 1
+    },
+    cost,
+    remoteVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedVideoModel.displayName,
+    cost,
+    video: {
+      ...remoteVideo,
+      label: selectedVideoModel.displayName,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
   });
 }
 
@@ -2236,8 +2383,8 @@ function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind
     unit: "second",
     mediaType: "video",
     resolution,
-    pricingBasis: "Seedance 2.0 per-second fal.ai pricing estimate",
-    pricingSource: "configured-pricing-v1",
+    pricingBasis: "Seedance 2.0 fal.ai 720p per-second pricing estimate",
+    pricingSource: "fal-model-page-2026-05-15",
     routeKind
   };
 }
@@ -2245,7 +2392,7 @@ function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind
 function estimateWanFunControlCost({ endpoint, matchInputNumFrames, numFrames, matchInputFps, fps }) {
   const billingFrames = matchInputNumFrames ? 81 : numFrames;
   const seconds = billingFrames / 16;
-  const unitRateUsd = 0.1;
+  const unitRateUsd = wanFunControlCostPerSecond;
 
   return {
     amountUsd: roundCurrency(seconds * unitRateUsd),
@@ -2266,15 +2413,18 @@ function estimateWanFunControlCost({ endpoint, matchInputNumFrames, numFrames, m
 }
 
 function estimateAuroraCost({ endpoint, resolution, duration }) {
+  const seconds = Number(duration) > 0 ? Math.ceil(Number(duration)) : null;
+  const unitRateUsd = resolution === "480p" ? aurora480pCostPerSecond : aurora720pCostPerSecond;
+
   return {
-    amountUsd: null,
+    amountUsd: seconds ? roundCurrency(seconds * unitRateUsd) : null,
     currency: "USD",
-    unitRateUsd: null,
-    units: duration || null,
-    unit: "request",
+    unitRateUsd,
+    units: seconds,
+    unit: "video second",
     mediaType: "video",
     resolution,
-    pricingBasis: "Creatify Aurora fal.ai request; local price estimate not configured",
+    pricingBasis: "Creatify Aurora fal.ai rounded per-video-second pricing estimate",
     pricingSource: "fal-model-page-2026-05-12",
     endpoint
   };
@@ -2282,58 +2432,96 @@ function estimateAuroraCost({ endpoint, resolution, duration }) {
 
 function estimateSam3ImageCost({ endpoint }) {
   return {
-    amountUsd: null,
+    amountUsd: sam3ImageCostPerRequest,
     currency: "USD",
-    unitRateUsd: null,
+    unitRateUsd: sam3ImageCostPerRequest,
     units: 1,
     unit: "request",
     mediaType: "image",
-    pricingBasis: "SAM 3 image segmentation fal.ai request; local price estimate not configured",
+    pricingBasis: "SAM 3 image segmentation fal.ai per-request pricing estimate",
     pricingSource: "fal-model-page-2026-05-12",
     endpoint
   };
 }
 
-function estimateSam3VideoCost({ endpoint }) {
+function estimateSam3VideoCost({ endpoint, frames }) {
+  const frameCount = Number(frames || 0);
+  const billedUnits = frameCount > 0 ? Math.ceil(frameCount / 16) : null;
+
   return {
-    amountUsd: null,
+    amountUsd: billedUnits ? roundCurrency(billedUnits * sam3VideoCostPer16Frames) : null,
     currency: "USD",
-    unitRateUsd: 0.005,
-    units: null,
+    unitRateUsd: sam3VideoCostPer16Frames,
+    units: billedUnits,
     unit: "16 frames",
     mediaType: "video",
-    pricingBasis: "SAM 3 video segmentation fal.ai pricing estimate at $0.005 per 16 frames; local frame count unavailable",
+    pricingBasis: billedUnits
+      ? "SAM 3 video segmentation fal.ai pricing estimate at $0.005 per 16 frames"
+      : "SAM 3 video segmentation fal.ai pricing estimate at $0.005 per 16 frames; local frame count unavailable",
     pricingSource: "fal-model-page-2026-05-12",
-    endpoint
+    endpoint,
+    frames: frameCount || null
   };
 }
 
-function estimateFalImageUtilityCost({ endpoint, mediaType, pricingBasis }) {
+function estimateFalImageUtilityCost({ endpoint, mediaType, pricingBasis, amountUsd = null, unitRateUsd = null, units = 1, unit = "request", pricingSource = "fal-model-page-2026-05-13" }) {
   return {
-    amountUsd: null,
+    amountUsd,
     currency: "USD",
-    unitRateUsd: null,
-    units: 1,
-    unit: "request",
+    unitRateUsd,
+    units,
+    unit,
     mediaType,
     pricingBasis,
-    pricingSource: "fal-model-page-2026-05-13",
+    pricingSource,
     endpoint
   };
 }
 
-function estimateFalVideoUtilityCost({ endpoint, pricingBasis }) {
+function estimateFalVideoUtilityCost({ endpoint, pricingBasis, amountUsd = null, unitRateUsd = null, units = 1, unit = "request", pricingSource = "fal-model-page-2026-05-15" }) {
   return {
-    amountUsd: null,
+    amountUsd,
     currency: "USD",
-    unitRateUsd: null,
-    units: 1,
-    unit: "request",
+    unitRateUsd,
+    units,
+    unit,
     mediaType: "video",
     pricingBasis,
-    pricingSource: "fal-model-page-2026-05-15",
+    pricingSource,
     endpoint
   };
+}
+
+function estimatePatinaCost({ endpoint, maps, image }) {
+  const width = Number(image?.width || 0);
+  const height = Number(image?.height || 0);
+  const mapCount = Math.max(1, Array.isArray(maps) ? maps.length : 1);
+  const megapixels = width > 0 && height > 0 ? (width * height) / 1000000 : null;
+  const amountUsd = megapixels ? roundCurrency(patinaBaseCost + megapixels * mapCount * patinaMapCostPerMegapixel) : null;
+
+  return estimateFalImageUtilityCost({
+    endpoint,
+    mediaType: "image",
+    amountUsd,
+    unitRateUsd: patinaMapCostPerMegapixel,
+    units: megapixels ? roundCurrency(megapixels * mapCount) : null,
+    unit: "map megapixel",
+    pricingBasis: "Patina fal.ai estimate at $0.01 base plus $0.01 per megapixel per output map",
+    pricingSource: "fal-model-page-2026-05-15"
+  });
+}
+
+function estimateVoidVideoInpaintingCost({ endpoint, enablePass2Refinement, hasMaskVideo }) {
+  const operationCount = 1 + (enablePass2Refinement ? 1 : 0) + (hasMaskVideo ? 0 : 1);
+  return estimateFalVideoUtilityCost({
+    endpoint,
+    amountUsd: roundCurrency(operationCount * voidVideoInpaintingBaseCost),
+    unitRateUsd: voidVideoInpaintingBaseCost,
+    units: operationCount,
+    unit: "video operation",
+    pricingBasis: "VOID fal.ai estimate at $0.05 per video, +$0.05 for Pass2, +$0.05 when SAM 3 quad mask generation is needed",
+    pricingSource: "fal-model-page-2026-05-15"
+  });
 }
 
 function estimateQwenCameraEditCost({ endpoint, image }) {
@@ -2367,7 +2555,8 @@ function estimateImageCost({ resolution }) {
     unit: "image",
     mediaType: "image",
     resolution,
-    pricingBasis: "Gemini 3 Pro Image Preview output image estimate"
+    pricingBasis: "Nano Banana Pro fal.ai per-image estimate",
+    pricingSource: "fal-model-page-2026-05-15"
   };
 }
 
@@ -2386,11 +2575,43 @@ function estimateOpenAiImage2Cost({ resolution, size, quality }) {
   };
 }
 
-function estimateTextProcessingCost({ provider, imageInputs = [], videoInputs = [] }) {
+function estimateTextProcessingCost({ provider, usage = null, helperUsages = [], imageInputs = [], videoInputs = [] }) {
   const normalizedProvider = String(provider || "").toLowerCase();
-  const textRequestCost = normalizedProvider === "fal" ? falTextRequestCost : 0;
-  const imageHelperCost = normalizedProvider === "fal" && imageInputs.length ? falVisionTextUnitCost : 0;
-  const videoHelperCost = normalizedProvider === "fal" && videoInputs.length ? falVideoTextUnitCost : 0;
+  const requestUsageCost = usageCost(usage);
+  const helperUsageCosts = (Array.isArray(helperUsages) ? helperUsages : []).map(usageCost).filter((amount) => amount !== null);
+
+  if (normalizedProvider === "fal" && (requestUsageCost !== null || helperUsageCosts.length)) {
+    const fallbackRequestCost = requestUsageCost === null ? falTextRequestCost : 0;
+    const amountUsd = roundCurrency((requestUsageCost || 0) + fallbackRequestCost + helperUsageCosts.reduce((sum, amount) => sum + amount, 0));
+
+    return {
+      amountUsd,
+      currency: "USD",
+      unitRateUsd: null,
+      units: 1 + helperUsageCosts.length,
+      unit: "reported request",
+      mediaType: "text",
+      pricingBasis: "fal.ai reported OpenRouter token usage plus any-llm base request fallback when needed",
+      pricingSource: "fal-usage-response"
+    };
+  }
+
+  if (normalizedProvider !== "fal") {
+    return {
+      amountUsd: null,
+      currency: "USD",
+      unitRateUsd: null,
+      units: 1,
+      unit: "request",
+      mediaType: "text",
+      pricingBasis: "OpenAI text usage recorded, but local token-to-price estimate is not configured",
+      pricingSource: "usage-no-local-pricing"
+    };
+  }
+
+  const textRequestCost = falTextRequestCost;
+  const imageHelperCost = imageInputs.length ? falVisionTextUnitCost : 0;
+  const videoHelperCost = videoInputs.length ? falVideoTextUnitCost : 0;
   const amountUsd = roundCurrency(textRequestCost + imageHelperCost + videoHelperCost);
 
   return {
@@ -2403,6 +2624,57 @@ function estimateTextProcessingCost({ provider, imageInputs = [], videoInputs = 
     pricingBasis: normalizedProvider === "fal" ? "fal.ai any-llm request estimate plus media helper calls" : "No local token estimate for OpenAI text",
     pricingSource: "configured-pricing-v1"
   };
+}
+
+function usageCost(usage) {
+  if (!usage) return null;
+
+  if (Array.isArray(usage)) {
+    const amounts = usage.map(usageCost).filter((amount) => amount !== null);
+    return amounts.length ? amounts.reduce((sum, amount) => sum + amount, 0) : null;
+  }
+
+  if (typeof usage === "object") {
+    const nestedAmounts = [usage.request, ...(Array.isArray(usage.helpers) ? usage.helpers : [])].map(usageCost).filter((amount) => amount !== null);
+    if (nestedAmounts.length) return nestedAmounts.reduce((sum, amount) => sum + amount, 0);
+
+    for (const key of ["cost", "amountUsd", "amount_usd", "totalCost", "total_cost"]) {
+      const amount = Number(usage[key]);
+      if (usage[key] !== null && usage[key] !== undefined && Number.isFinite(amount)) return amount;
+    }
+  }
+
+  return null;
+}
+
+function falTimingSeconds(result) {
+  const timings = result?.data?.timings || result?.timings;
+  if (!timings || typeof timings !== "object") return null;
+
+  for (const key of ["total", "inference", "compute", "execution"]) {
+    const amount = Number(timings[key]);
+    if (Number.isFinite(amount) && amount > 0) return amount;
+  }
+
+  const values = Object.values(timings).map(Number).filter((value) => Number.isFinite(value) && value > 0);
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function costFromTiming(result, unitRateUsd) {
+  const seconds = falTimingSeconds(result);
+  return seconds ? roundCurrency(seconds * unitRateUsd) : null;
+}
+
+function videoFrameCount(...candidates) {
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") continue;
+    for (const key of ["num_frames", "numFrames", "frames", "frame_count", "frameCount"]) {
+      const frames = Number(candidate[key]);
+      if (Number.isFinite(frames) && frames > 0) return frames;
+    }
+  }
+
+  return null;
 }
 
 function durationToSeconds(duration) {
@@ -2477,9 +2749,9 @@ async function processTextWithFal({ text, textInputs, imageInputs, videoInputs }
   }
 
   const model = falTextModel;
-  const imageDescriptions = await describeImageInputs(imageInputs);
-  const videoDescriptions = await describeVideoInputs(videoInputs);
-  const prompt = buildTextProcessingPrompt({ text, textInputs, imageDescriptions, videoDescriptions });
+  const imageContext = await describeImageInputs(imageInputs);
+  const videoContext = await describeVideoInputs(videoInputs);
+  const prompt = buildTextProcessingPrompt({ text, textInputs, imageDescriptions: imageContext.descriptions, videoDescriptions: videoContext.descriptions });
   const data = await fal.subscribe("fal-ai/any-llm", {
     input: {
       model,
@@ -2499,7 +2771,8 @@ async function processTextWithFal({ text, textInputs, imageInputs, videoInputs }
     provider: "fal",
     endpoint: "fal-ai/any-llm",
     submittedPrompt: prompt,
-    usage: data?.usage || data?.metrics || null
+    usage: falResultUsage(data),
+    helperUsages: [...imageContext.usages, ...videoContext.usages]
   };
 }
 
@@ -2544,7 +2817,8 @@ async function processTextWithOpenAi({ text, textInputs, imageInputs, videoInput
     provider: "OpenAI",
     endpoint: model,
     submittedPrompt: prompt,
-    usage: data.usage || null
+    usage: data.usage || null,
+    helperUsages: []
   };
 }
 
@@ -2553,7 +2827,7 @@ function textProcessingInstructions() {
 }
 
 async function describeImageInputs(imageInputs) {
-  if (!imageInputs.length) return [];
+  if (!imageInputs.length) return { descriptions: [], usages: [] };
 
   const imageUrls = await Promise.all(imageInputs.map((item) => localAssetToFalUrl(item.url)));
   const data = await fal.subscribe("openrouter/router/vision", {
@@ -2566,11 +2840,14 @@ async function describeImageInputs(imageInputs) {
     logs: true
   });
   const description = extractFalText(data).trim();
-  return description ? [`Connected images: ${description}`] : [];
+  return {
+    descriptions: description ? [`Connected images: ${description}`] : [],
+    usages: [falResultUsage(data)].filter(Boolean)
+  };
 }
 
 async function describeVideoInputs(videoInputs) {
-  if (!videoInputs.length) return [];
+  if (!videoInputs.length) return { descriptions: [], usages: [] };
 
   const videoUrls = await Promise.all(videoInputs.map((item) => localAssetToFalUrl(item.url)));
   const data = await fal.subscribe("openrouter/router/video", {
@@ -2583,7 +2860,10 @@ async function describeVideoInputs(videoInputs) {
     logs: true
   });
   const description = extractFalText(data).trim();
-  return description ? [`Connected videos: ${description}`] : [];
+  return {
+    descriptions: description ? [`Connected videos: ${description}`] : [],
+    usages: [falResultUsage(data)].filter(Boolean)
+  };
 }
 
 async function localAssetToFalUrl(publicPath) {
@@ -2629,6 +2909,10 @@ function extractFalText(data) {
   if (typeof nestedContent?.text === "string") return nestedContent.text;
 
   return "";
+}
+
+function falResultUsage(result) {
+  return result?.data?.usage || result?.usage || result?.data?.metrics || result?.metrics || null;
 }
 
 function routeKindLabel(routeKind, speed) {
@@ -2745,6 +3029,15 @@ function resolveUtilityVideoModel(model) {
       provider: "fal-birefnet-video",
       displayName: "BiRefNet Video",
       id: "fal-ai/birefnet/v2/video",
+      requiresPrompt: false
+    };
+  }
+
+  if (normalized.includes("rife")) {
+    return {
+      provider: "fal-rife-video",
+      displayName: "RIFE Video",
+      id: "fal-ai/rife/video",
       requiresPrompt: false
     };
   }

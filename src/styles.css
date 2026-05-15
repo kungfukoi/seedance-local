@@ -1024,6 +1024,12 @@ textarea::placeholder {
   font-size: 13px;
 }
 
+.ranked-row strong.unpriced-cost,
+.recent-table strong.unpriced-cost {
+  color: rgba(244, 240, 232, 0.48);
+  font-weight: 760;
+}
+
 .recent-table small,
 .recent-table span:not(.media-pill) {
   color: rgba(244, 240, 232, 0.48);

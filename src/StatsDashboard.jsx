@@ -12,12 +12,12 @@ import {
 
 const defaultPricing = {
   seedance: {
-    standardCostPerSecond: 0.014,
-    fastCostPerSecond: 0.0112
+    standardCostPerSecond: 0.3034,
+    fastCostPerSecond: 0.2419
   },
   nanoBananaPro: {
-    cost1K2K: 0.134,
-    cost4K: 0.24
+    cost1K2K: 0.15,
+    cost4K: 0.3
   },
   openAiImage2: {
     mediumCost: 0.053
@@ -26,6 +26,39 @@ const defaultPricing = {
     falRequestCost: 0.001,
     falVisionUnitCost: 0.01,
     falVideoUnitCost: 0.01
+  },
+  utility: {
+    wanFunControl: {
+      costPerSecond: 0.1
+    },
+    voidVideoInpainting: {
+      baseCost: 0.05,
+      pass2Cost: 0.05,
+      sam3QuadMaskCost: 0.05
+    },
+    sam3Image: {
+      costPerRequest: 0.005
+    },
+    sam3Video: {
+      costPer16Frames: 0.005
+    },
+    aurora: {
+      costPerSecond480p: 0.07,
+      costPerSecond720p: 0.14
+    },
+    dwpose: {
+      costPerComputeSecond: 0.0006
+    },
+    depthAnything: {
+      costPerComputeSecond: 0
+    },
+    birefnet: {
+      costPerComputeSecond: 0
+    },
+    patina: {
+      baseCost: 0.01,
+      mapCostPerMegapixel: 0.01
+    }
   }
 };
 
@@ -85,15 +118,15 @@ export default function StatsDashboard() {
       </header>
 
       <div className="stats-metrics">
-        <MetricCard icon={<DollarSign size={20} />} label="Estimated spend" value={formatCurrency(stats.totalCost)} detail={`${formatCurrency(stats.averageCost)} avg / run`} />
+        <MetricCard icon={<DollarSign size={20} />} label="Estimated spend" value={formatCurrency(stats.totalCost)} detail={`${formatCurrency(stats.averageCost)} avg / priced run${unpricedSuffix(stats.unpricedCount)}`} />
         <MetricCard icon={<Activity size={20} />} label="Generations" value={stats.totalCount} detail={`${stats.videoCount} video, ${stats.imageCount} image, ${stats.textCount} text`} />
         <MetricCard icon={<Film size={20} />} label="Video seconds" value={`${stats.videoSeconds}s`} detail={`${stats.fastCount} fast runs`} />
-        <MetricCard icon={<Layers3 size={20} />} label="Top project" value={stats.topProject?.name || "None yet"} detail={stats.topProject ? `${formatCurrency(stats.topProject.cost)} tracked` : "Waiting for runs"} />
+        <MetricCard icon={<Layers3 size={20} />} label="Top project" value={stats.topProject?.name || "None yet"} detail={stats.topProject ? `${formatCostLabel(stats.topProject)} tracked${unpricedSuffix(stats.topProject.unpricedCount)}` : "Waiting for runs"} />
       </div>
 
       <div className="stats-grid">
         <section className="stats-panel wide">
-          <PanelTitle icon={<TrendingUp size={17} />} title="Cost over time" aside="Estimated USD" />
+          <PanelTitle icon={<TrendingUp size={17} />} title="Cost over time" aside={stats.unpricedCount ? `${stats.unpricedCount} unpriced` : "Estimated USD"} />
           <CostChart days={stats.days} />
         </section>
 
@@ -124,7 +157,7 @@ export default function StatsDashboard() {
       </div>
 
       <p className="cost-note">
-        Costs use each run's recorded cost when available, with fal pricing defaults for older runs. Confirm final billing in fal.ai, Google Cloud, and OpenAI dashboards.
+        Costs use each run's recorded cost when available, with fal model-page estimates for older runs. Unpriced means the app does not have enough billing detail yet; confirm final charges in fal.ai, Google Cloud, and OpenAI dashboards.
       </p>
     </section>
   );
@@ -264,12 +297,12 @@ function RankedBars({ rows, emptyLabel }) {
         <div className="ranked-row" key={row.name}>
           <div>
             <span>{row.name}</span>
-            <small>{row.count} run{row.count === 1 ? "" : "s"}</small>
+            <small>{row.count} run{row.count === 1 ? "" : "s"}{unpricedSuffix(row.unpricedCount)}</small>
           </div>
           <div className="ranked-meter">
             <span style={{ width: `${(row.cost / maxCost) * 100}%` }} />
           </div>
-          <strong>{formatCurrency(row.cost)}</strong>
+          <strong className={row.pricedCount ? "" : "unpriced-cost"}>{formatCostLabel(row)}</strong>
         </div>
       ))}
     </div>
@@ -292,7 +325,7 @@ function RecentRuns({ rows }) {
           </div>
           <p>{row.prompt || "Untitled generation"}</p>
           <span>{formatShortDate(row.date)}</span>
-          <strong>{formatCurrency(row.cost)}</strong>
+          <strong className={row.hasCostEstimate ? "" : "unpriced-cost"}>{formatCostLabel(row)}</strong>
         </article>
       ))}
     </div>
@@ -311,8 +344,10 @@ function buildUsageStats(history, pricing) {
     if (day) {
       day.count += 1;
       day.cost += item.cost;
+      if (!item.hasCostEstimate) day.unpricedCount += 1;
       if (item.mediaType === "image") day.imageCount += 1;
       if (item.mediaType === "video") day.videoCount += 1;
+      if (item.mediaType === "text") day.textCount += 1;
     }
 
     addAggregate(modelMap, item.modelName, item);
@@ -327,6 +362,8 @@ function buildUsageStats(history, pricing) {
   const projects = aggregateRows(projectMap);
   const totalCost = round(normalized.reduce((sum, item) => sum + item.cost, 0));
   const totalCount = normalized.length;
+  const pricedCount = normalized.filter((item) => item.hasCostEstimate).length;
+  const unpricedCount = totalCount - pricedCount;
   const videoCount = normalized.filter((item) => item.mediaType === "video").length;
   const imageCount = normalized.filter((item) => item.mediaType === "image").length;
   const textCount = normalized.filter((item) => item.mediaType === "text").length;
@@ -339,9 +376,11 @@ function buildUsageStats(history, pricing) {
     imageCount,
     videoCount,
     textCount,
+    pricedCount,
+    unpricedCount,
     videoSeconds,
     fastCount: normalized.filter((item) => item.isFast).length,
-    averageCost: totalCount ? round(totalCost / totalCount) : 0,
+    averageCost: pricedCount ? round(totalCost / pricedCount) : 0,
     topProject: projects[0],
     models,
     projects,
@@ -357,6 +396,7 @@ function normalizeUsageItem(item, pricing) {
   const projectId = item.project?.id || (mediaType === "image" ? "image" : mediaType === "text" ? "text" : "video");
   const projectName = item.project?.name || (mediaType === "image" ? "Image" : mediaType === "text" ? "Text" : "Video");
   const cost = resolvedItemCost(item, mediaType, pricing);
+  const hasCostEstimate = Number.isFinite(cost);
   const durationSeconds = mediaType === "video" ? durationToSeconds(settings.duration) : 0;
   const cutoff = startOfDay(new Date());
   cutoff.setDate(cutoff.getDate() - 29);
@@ -371,38 +411,69 @@ function normalizeUsageItem(item, pricing) {
     projectId,
     projectName,
     prompt: item.prompt,
-    cost: round(cost),
+    cost: hasCostEstimate ? round(cost) : 0,
+    hasCostEstimate,
+    pricingBasis: item.cost?.pricingBasis || "",
     durationSeconds,
     isFast: settings.speed === "fast" || String(item.endpoint || "").includes("/fast/")
   };
 }
 
 function resolvedItemCost(item, mediaType, pricing) {
-  const storedCost = Number(item.cost?.amountUsd);
-  const hasTrustedStoredCost = Number.isFinite(storedCost) && item.cost?.pricingSource;
+  const storedCost = numericCostAmount(item.cost);
+  const estimatedCost = estimateItemCost(item, mediaType, pricing);
+  const trustedSource = item.cost?.pricingSource && item.cost.pricingSource !== "configured-pricing-v1";
 
-  if (hasTrustedStoredCost) return storedCost;
-  if (mediaType === "image" && Number.isFinite(storedCost)) return storedCost;
-
-  return estimateItemCost(item, mediaType, pricing);
+  if (storedCost !== null && item.cost?.pricingSource === "fal-usage-response") return storedCost;
+  if (estimatedCost !== null) return estimatedCost;
+  if (storedCost !== null && trustedSource) return storedCost;
+  return storedCost;
 }
 
 function estimateItemCost(item, mediaType, pricing) {
   const settings = item.settings || {};
+  const modelKey = [item.modelName, settings.model, item.endpoint, item.mode].filter(Boolean).join(" ").toLowerCase();
 
   if (mediaType === "image") {
-    if (String(item.modelName || settings.model || "").toLowerCase().includes("openai")) {
+    if (modelKey.includes("qwen")) {
+      return estimateMegapixelCost(item.remoteImage, 0.035);
+    }
+
+    if (modelKey.includes("sam 3") || modelKey.includes("sam-3")) {
+      return pricing.utility?.sam3Image?.costPerRequest ?? defaultPricing.utility.sam3Image.costPerRequest;
+    }
+
+    if (modelKey.includes("depth anything") || modelKey.includes("depth-anything") || modelKey.includes("birefnet")) {
+      return 0;
+    }
+
+    if (modelKey.includes("patina")) {
+      return estimatePatinaStatsCost(item, pricing);
+    }
+
+    if (modelKey.includes("dwpose")) {
+      return null;
+    }
+
+    if (modelKey.includes("openai")) {
       return pricing.openAiImage2?.mediumCost || defaultPricing.openAiImage2.mediumCost;
     }
 
-    return String(settings.resolution || "").toUpperCase().includes("4K")
-      ? pricing.nanoBananaPro.cost4K
-      : pricing.nanoBananaPro.cost1K2K;
+    if (modelKey.includes("nano") || modelKey.includes("banana") || modelKey.includes("gemini")) {
+      return String(settings.resolution || "").toUpperCase().includes("4K")
+        ? pricing.nanoBananaPro.cost4K
+        : pricing.nanoBananaPro.cost1K2K;
+    }
+
+    return null;
   }
 
   if (mediaType === "text") {
     const textPricing = pricing.textProcessing || defaultPricing.textProcessing;
-    if (String(item.provider || settings.provider || "").toLowerCase() !== "fal") return 0;
+    if (String(item.provider || settings.provider || "").toLowerCase() !== "fal") return null;
+
+    const usageAmount = usageCost(item.usage);
+    if (usageAmount !== null) return usageAmount;
 
     return (
       textPricing.falRequestCost +
@@ -411,9 +482,106 @@ function estimateItemCost(item, mediaType, pricing) {
     );
   }
 
-  const isFast = settings.speed === "fast" || String(item.endpoint || "").includes("/fast/");
-  const rate = isFast ? pricing.seedance.fastCostPerSecond : pricing.seedance.standardCostPerSecond;
-  return durationToSeconds(settings.duration) * rate;
+  if (modelKey.includes("seedance") || modelKey.includes("bytedance/seedance")) {
+    const isFast = settings.speed === "fast" || String(item.endpoint || "").includes("/fast/");
+    const rate = isFast ? pricing.seedance.fastCostPerSecond : pricing.seedance.standardCostPerSecond;
+    return durationToSeconds(settings.duration) * rate;
+  }
+
+  if (modelKey.includes("wan-fun-control") || modelKey.includes("wan fun control")) {
+    const utilityPricing = pricing.utility?.wanFunControl || defaultPricing.utility.wanFunControl;
+    const billingFrames = settings.matchInputNumFrames === false ? Number(settings.numFrames || 81) : 81;
+    return (billingFrames / 16) * utilityPricing.costPerSecond;
+  }
+
+  if (modelKey.includes("void") || modelKey.includes("video inpainting")) {
+    return estimateVoidStatsCost(settings, pricing);
+  }
+
+  if (modelKey.includes("aurora") || modelKey.includes("creatify")) {
+    return estimateAuroraStatsCost(item, settings, pricing);
+  }
+
+  if (modelKey.includes("sam 3") || modelKey.includes("sam-3")) {
+    return estimateSam3VideoStatsCost(item, settings, pricing);
+  }
+
+  if (modelKey.includes("birefnet")) {
+    return 0;
+  }
+
+  return null;
+}
+
+function numericCostAmount(cost) {
+  if (!cost || cost.amountUsd === null || cost.amountUsd === undefined || cost.amountUsd === "") return null;
+  const amount = Number(cost.amountUsd);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function usageCost(usage) {
+  if (!usage) return null;
+
+  if (Array.isArray(usage)) {
+    const amounts = usage.map(usageCost).filter((amount) => amount !== null);
+    return amounts.length ? amounts.reduce((sum, amount) => sum + amount, 0) : null;
+  }
+
+  if (typeof usage === "object") {
+    const nestedAmounts = [usage.request, ...(Array.isArray(usage.helpers) ? usage.helpers : [])].map(usageCost).filter((amount) => amount !== null);
+    if (nestedAmounts.length) return nestedAmounts.reduce((sum, amount) => sum + amount, 0);
+
+    for (const key of ["cost", "amountUsd", "amount_usd", "totalCost", "total_cost"]) {
+      const amount = Number(usage[key]);
+      if (usage[key] !== null && usage[key] !== undefined && Number.isFinite(amount)) return amount;
+    }
+  }
+
+  return null;
+}
+
+function estimateMegapixelCost(image, unitRateUsd) {
+  const width = Number(image?.width || 0);
+  const height = Number(image?.height || 0);
+  if (width <= 0 || height <= 0) return null;
+  return (width * height * unitRateUsd) / 1000000;
+}
+
+function estimatePatinaStatsCost(item, pricing) {
+  const image = item.remoteImage || item.remoteImages?.[0];
+  const width = Number(image?.width || 0);
+  const height = Number(image?.height || 0);
+  if (width <= 0 || height <= 0) return null;
+
+  const utilityPricing = pricing.utility?.patina || defaultPricing.utility.patina;
+  const maps = Array.isArray(item.settings?.maps) ? item.settings.maps : [];
+  const mapCount = Math.max(1, maps.length || Number(item.settings?.mapCount || 0) || 1);
+  const megapixels = (width * height) / 1000000;
+  return utilityPricing.baseCost + megapixels * mapCount * utilityPricing.mapCostPerMegapixel;
+}
+
+function estimateVoidStatsCost(settings, pricing) {
+  const utilityPricing = pricing.utility?.voidVideoInpainting || defaultPricing.utility.voidVideoInpainting;
+  return (
+    utilityPricing.baseCost +
+    (settings.enablePass2Refinement ? utilityPricing.pass2Cost : 0) +
+    (Number(settings.maskVideoCount || 0) > 0 ? 0 : utilityPricing.sam3QuadMaskCost)
+  );
+}
+
+function estimateAuroraStatsCost(item, settings, pricing) {
+  const utilityPricing = pricing.utility?.aurora || defaultPricing.utility.aurora;
+  const duration = Number(item.remoteVideo?.duration || settings.duration || 0);
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  const rate = settings.resolution === "480p" ? utilityPricing.costPerSecond480p : utilityPricing.costPerSecond720p;
+  return Math.ceil(duration) * rate;
+}
+
+function estimateSam3VideoStatsCost(item, settings, pricing) {
+  const utilityPricing = pricing.utility?.sam3Video || defaultPricing.utility.sam3Video;
+  const frames = Number(item.remoteVideo?.num_frames || item.remoteVideo?.numFrames || settings.numFrames || 0);
+  if (!Number.isFinite(frames) || frames <= 0) return null;
+  return Math.ceil(frames / 16) * utilityPricing.costPer16Frames;
 }
 
 function inferModelName(item, mediaType) {
@@ -423,8 +591,13 @@ function inferModelName(item, mediaType) {
 }
 
 function addAggregate(map, key, item, label = key) {
-  const row = map.get(key) || { name: label, count: 0, cost: 0 };
+  const row = map.get(key) || { name: label, count: 0, pricedCount: 0, unpricedCount: 0, cost: 0 };
   row.count += 1;
+  if (item.hasCostEstimate) {
+    row.pricedCount += 1;
+  } else {
+    row.unpricedCount += 1;
+  }
   row.cost = round(row.cost + item.cost);
   map.set(key, row);
 }
@@ -445,7 +618,9 @@ function makeThirtyDays() {
       count: 0,
       cost: 0,
       imageCount: 0,
-      videoCount: 0
+      videoCount: 0,
+      textCount: 0,
+      unpricedCount: 0
     };
   });
 }
@@ -466,12 +641,28 @@ function durationToSeconds(duration) {
   return Number(match?.[0] || 15);
 }
 
+function formatCostLabel(row) {
+  if (row?.hasCostEstimate === false || row?.pricedCount === 0) return "Unpriced";
+  return formatCurrency(row?.cost ?? row);
+}
+
+function unpricedSuffix(count) {
+  return count ? ` · ${count} unpriced` : "";
+}
+
 function formatCurrency(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "Unpriced";
+  const absolute = Math.abs(amount);
+  const maximumFractionDigits = absolute > 0 && absolute < 0.01 ? 4 : amount >= 10 ? 2 : 3;
+  const minimumFractionDigits = absolute > 0 && absolute < 0.01 ? 4 : 0;
+
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    maximumFractionDigits: value >= 10 ? 2 : 3
-  }).format(Number(value || 0));
+    minimumFractionDigits,
+    maximumFractionDigits
+  }).format(amount);
 }
 
 function formatShortDate(date) {
@@ -491,5 +682,6 @@ function timeLabel(date) {
 }
 
 function round(value) {
-  return Math.round(Number(value || 0) * 10000) / 10000;
+  const amount = Number(value);
+  return Number.isFinite(amount) ? Math.round(amount * 10000) / 10000 : 0;
 }

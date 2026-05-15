@@ -212,7 +212,8 @@ const utilityVideoModelNames = {
   wanFunControl: "Wan Fun Control",
   sam3Video: "SAM 3 Video",
   voidVideoInpainting: "VOID Video Inpainting",
-  birefnetVideo: "BiRefNet Video"
+  birefnetVideo: "BiRefNet Video",
+  rifeVideo: "RIFE Video"
 };
 const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
 const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
@@ -225,7 +226,8 @@ const utilityModelDescriptions = {
   [utilityVideoModelNames.wanFunControl]: "Uses a control video, optional reference image, and prompt to guide a new video.",
   [utilityVideoModelNames.sam3Video]: "Segments prompted objects through a video and returns the masked result.",
   [utilityVideoModelNames.voidVideoInpainting]: "Removes an object from a video and inpaints the affected background over time.",
-  [utilityVideoModelNames.birefnetVideo]: "Removes a video background with BiRefNet and can optionally return the mask video."
+  [utilityVideoModelNames.birefnetVideo]: "Removes a video background with BiRefNet and can optionally return the mask video.",
+  [utilityVideoModelNames.rifeVideo]: "Interpolates in-between frames with RIFE optical-flow style motion estimation to smooth low-FPS video."
 };
 const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 
@@ -2860,6 +2862,7 @@ function NodeBody({
     const isSam3Video = isUtilitySam3VideoModel(utilityVideoModel);
     const isVoidVideo = isUtilityVoidVideoModel(utilityVideoModel);
     const isBirefnetVideo = isUtilityBirefnetVideoModel(utilityVideoModel);
+    const isRifeVideo = isUtilityRifeVideoModel(utilityVideoModel);
     const utilityOutputPort = {
       ...config.output[0],
       label: isVideoMode ? "Video output" : "Image output",
@@ -2876,7 +2879,7 @@ function NodeBody({
           .filter(Boolean);
     const resultType = node.data.resultType || mode;
     const canRun = isVideoMode
-      ? Boolean(incoming.referenceVideoIn?.length) && (isBirefnetVideo || Boolean(promptValue.trim()))
+      ? Boolean(incoming.referenceVideoIn?.length) && (isBirefnetVideo || isRifeVideo || Boolean(promptValue.trim()))
       : Boolean(incoming.imageIn?.length) && (!isSam3Image || Boolean(promptValue.trim()));
     const utilityRunLabel = isVideoMode
       ? isSam3Video
@@ -2885,7 +2888,9 @@ function NodeBody({
           ? "Run VOID"
           : isBirefnetVideo
             ? "Run BiRefNet Video"
-            : "Run Wan Fun Control"
+            : isRifeVideo
+              ? "Run RIFE"
+              : "Run Wan Fun Control"
       : isSam3Image
         ? "Run SAM 3 Image"
         : isBirefnetImage
@@ -2966,15 +2971,16 @@ function NodeBody({
                   <option>{utilityVideoModelNames.wanFunControl}</option>
                   <option>{utilityVideoModelNames.voidVideoInpainting}</option>
                   <option>{utilityVideoModelNames.birefnetVideo}</option>
+                  <option>{utilityVideoModelNames.rifeVideo}</option>
                   <option>{utilityVideoModelNames.sam3Video}</option>
                 </select>
               </NodeRow>
-              {!isBirefnetVideo && (
+              {!isBirefnetVideo && !isRifeVideo && (
                 <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
                   <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
                 </NodeRow>
               )}
-              {!isSam3Video && !isBirefnetVideo && (
+              {!isSam3Video && !isBirefnetVideo && !isRifeVideo && (
                 <NodeRow label="Generations">
                   <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
                     {batchOptions.map((option) => (
@@ -2985,7 +2991,7 @@ function NodeBody({
                   </select>
                 </NodeRow>
               )}
-              <NodeRow label={isSam3Video || isBirefnetVideo ? "Video" : isVoidVideo ? "Source Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <NodeRow label={isSam3Video || isBirefnetVideo || isRifeVideo ? "Video" : isVoidVideo ? "Source Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
                 <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add video")}</button>
               </NodeRow>
               {isSam3Video ? (
@@ -2998,7 +3004,7 @@ function NodeBody({
                     <button className={incoming.maskVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.maskVideoIn, "Optional mask")}</button>
                   </NodeRow>
                   <NodeRow label="Mask Prompt">
-                    <input value={node.data.voidMaskPrompt || ""} onChange={(event) => onUpdate(node.id, { voidMaskPrompt: event.target.value })} placeholder="Object to remove" />
+                    <textarea value={node.data.voidMaskPrompt || ""} onChange={(event) => onUpdate(node.id, { voidMaskPrompt: event.target.value })} placeholder="Object to remove" />
                   </NodeRow>
                   <NodeRow label="Pass 2">
                     <button className={`node-toggle ${node.data.voidPass2Refinement ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { voidPass2Refinement: !node.data.voidPass2Refinement })}>
@@ -3027,6 +3033,32 @@ function NodeBody({
                   </NodeRow>
                   <NodeRow label="Seed">
                     <input value={node.data.voidSeed || ""} onChange={(event) => onUpdate(node.id, { voidSeed: event.target.value })} placeholder="Random" />
+                  </NodeRow>
+                </>
+              ) : isRifeVideo ? (
+                <>
+                  <NodeRow label="In-betweens">
+                    <input type="number" min="1" max="8" value={node.data.rifeNumFrames || 1} onChange={(event) => onUpdate(node.id, { rifeNumFrames: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Scene Detect">
+                    <button className={`node-toggle ${node.data.rifeUseSceneDetection !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { rifeUseSceneDetection: node.data.rifeUseSceneDetection === false })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  <NodeRow label="Auto FPS">
+                    <button className={`node-toggle ${node.data.rifeUseCalculatedFps !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { rifeUseCalculatedFps: node.data.rifeUseCalculatedFps === false })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  {node.data.rifeUseCalculatedFps === false && (
+                    <NodeRow label="FPS">
+                      <input type="number" min="1" max="120" value={node.data.rifeFps || 24} onChange={(event) => onUpdate(node.id, { rifeFps: event.target.value })} />
+                    </NodeRow>
+                  )}
+                  <NodeRow label="Loop">
+                    <button className={`node-toggle ${node.data.rifeLoop ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { rifeLoop: !node.data.rifeLoop })}>
+                      <span />
+                    </button>
                   </NodeRow>
                 </>
               ) : isBirefnetVideo ? (
@@ -3735,6 +3767,11 @@ function createDefaultNodeData(type, label, count) {
       numFrames: 81,
       matchInputFps: true,
       fps: 16,
+      rifeNumFrames: 1,
+      rifeUseSceneDetection: true,
+      rifeUseCalculatedFps: true,
+      rifeFps: 24,
+      rifeLoop: false,
       numInferenceSteps: 27,
       guidanceScale: 6,
       shift: 5,
@@ -3813,6 +3850,10 @@ function isUtilityBirefnetVideoModel(model) {
   return String(model || "").toLowerCase().includes("birefnet");
 }
 
+function isUtilityRifeVideoModel(model) {
+  return String(model || "").toLowerCase().includes("rife");
+}
+
 function isUtilityVoidVideoModel(model) {
   const normalized = String(model || "").toLowerCase();
   return normalized.includes("void") || normalized.includes("inpaint");
@@ -3836,6 +3877,7 @@ function utilityInputPortIds(mode, imageModel = utilityImageModelNames.dwpose, v
   }
 
   if (isUtilityBirefnetVideoModel(videoModel)) return ["referenceVideoIn"];
+  if (isUtilityRifeVideoModel(videoModel)) return ["referenceVideoIn"];
   if (isUtilityVoidVideoModel(videoModel)) return ["promptIn", "referenceVideoIn", "maskVideoIn"];
   return isUtilitySam3VideoModel(videoModel) ? ["promptIn", "referenceVideoIn"] : ["promptIn", "referenceImageIn", "referenceVideoIn"];
 }
@@ -3853,6 +3895,7 @@ function normalizedUtilityVideoModelName(model) {
   const normalized = String(model || "").toLowerCase();
   if (normalized.includes("sam") && normalized.includes("video")) return utilityVideoModelNames.sam3Video;
   if (normalized.includes("birefnet")) return utilityVideoModelNames.birefnetVideo;
+  if (normalized.includes("rife")) return utilityVideoModelNames.rifeVideo;
   if (normalized.includes("void") || normalized.includes("inpaint")) return utilityVideoModelNames.voidVideoInpainting;
   return utilityVideoModelNames.wanFunControl;
 }
@@ -4260,6 +4303,13 @@ async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, pr
         numFrames: node.data.voidNumFrames || 85,
         enableSafetyChecker: node.data.voidEnableSafetyChecker !== false,
         seed: node.data.voidSeed || ""
+      },
+      rifeVideo: {
+        numFrames: node.data.rifeNumFrames || 1,
+        useSceneDetection: node.data.rifeUseSceneDetection !== false,
+        useCalculatedFps: node.data.rifeUseCalculatedFps !== false,
+        fps: node.data.rifeFps || 24,
+        loop: Boolean(node.data.rifeLoop)
       },
       birefnet: {
         model: node.data.birefnetModel || "General Use (Light)",
@@ -4776,6 +4826,11 @@ function normalizeUtilityData(data = {}) {
     numFrames: data.numFrames || 81,
     matchInputFps: data.matchInputFps !== false,
     fps: data.fps || 16,
+    rifeNumFrames: data.rifeNumFrames || 1,
+    rifeUseSceneDetection: data.rifeUseSceneDetection !== false,
+    rifeUseCalculatedFps: data.rifeUseCalculatedFps !== false,
+    rifeFps: data.rifeFps || 24,
+    rifeLoop: Boolean(data.rifeLoop),
     numInferenceSteps: data.numInferenceSteps || 27,
     guidanceScale: data.guidanceScale || 6,
     shift: data.shift || 5,
