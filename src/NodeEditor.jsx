@@ -1,5 +1,7 @@
 import React from "react";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import {
   Box,
   Camera,
@@ -58,10 +60,15 @@ const portColors = {
 const maxTransferImages = 6;
 const batchOptions = ["1", "2", "3", "4"];
 const voidVideoFrameOptions = [69, 77, 85, 93, 101, 109, 117, 125, 133, 141, 149, 157, 165, 173, 181, 189, 197];
+const composerMannequinModelPath = "/models/male_mannequin.glb";
+const composerMannequinModelScale = 1.45;
 const composerReferencePrompt =
   "Use the connected Composer frame as a strict composition and blocking control image. Preserve its camera angle, framing, horizon/floor plane, subject silhouette, pose direction, major object positions, scale relationships, and negative space. Translate the simple maquette and proxy objects into the requested final subject matter, but do not copy viewport guide lines, grid lines, flat blue material, or simple primitive geometry as final image details.";
 const transferPromptSuffix =
   "Only use the uploaded collage reference image labeled TRANSFER.png as a transfer reference for color grading, grain style, texture, lighting, and camera qualities. The generated image should NOT take content, layout, subjects, or composition from TRANSFER.png directly; only use it as a visual transfer guide.";
+let composerMannequinAsset = null;
+let composerMannequinAssetPromise = null;
+let composerMannequinAssetFailed = false;
 const stylePresetPrompts = {
   None: "",
   Cinematic:
@@ -126,13 +133,53 @@ const qwenCameraDefaults = {
   guidanceScale: 4.5,
   numInferenceSteps: 28
 };
-const composerPosePresets = {
-  standing: { pose: "standing", upperArm: 0, lowerArm: 0, upperLeg: 0, lowerLeg: 0, lean: 0 },
-  walk: { pose: "walk", upperArm: 0.55, lowerArm: 0.24, upperLeg: -0.55, lowerLeg: 0.28, lean: 0.08 },
-  run: { pose: "run", upperArm: 1, lowerArm: 0.55, upperLeg: -0.95, lowerLeg: 0.62, lean: 0.22 },
-  lean: { pose: "lean", upperArm: 0.15, lowerArm: 0.1, upperLeg: 0.05, lowerLeg: 0.08, lean: 0.45 },
-  reach: { pose: "reach", upperArm: -0.95, lowerArm: -0.2, upperLeg: 0.15, lowerLeg: 0.1, lean: 0.12 }
-};
+const composerPoseFieldKeys = [
+  "leftUpperArm",
+  "leftUpperArmX",
+  "leftUpperArmY",
+  "leftUpperArmZ",
+  "leftLowerArm",
+  "leftLowerArmX",
+  "leftLowerArmY",
+  "leftLowerArmZ",
+  "rightUpperArm",
+  "rightUpperArmX",
+  "rightUpperArmY",
+  "rightUpperArmZ",
+  "rightLowerArm",
+  "rightLowerArmX",
+  "rightLowerArmY",
+  "rightLowerArmZ",
+  "leftUpperLeg",
+  "leftUpperLegX",
+  "leftUpperLegY",
+  "leftUpperLegZ",
+  "leftLowerLeg",
+  "leftLowerLegX",
+  "leftLowerLegY",
+  "leftLowerLegZ",
+  "rightUpperLeg",
+  "rightUpperLegX",
+  "rightUpperLegY",
+  "rightUpperLegZ",
+  "rightLowerLeg",
+  "rightLowerLegX",
+  "rightLowerLegY",
+  "rightLowerLegZ",
+  "leftHandRotX",
+  "leftHandRotY",
+  "leftHandRotZ",
+  "rightHandRotX",
+  "rightHandRotY",
+  "rightHandRotZ",
+  "headRotX",
+  "headRotY",
+  "headRotZ",
+  "upperBodyRotX",
+  "upperBodyRotY",
+  "upperBodyRotZ",
+  "lean"
+];
 const composerAspectRatios = {
   "21:9": "21 / 9",
   "16:9": "16 / 9",
@@ -140,6 +187,12 @@ const composerAspectRatios = {
   "1:1": "1 / 1",
   "9:16": "9 / 16"
 };
+const composerPrimitiveOptions = [
+  { id: "box", label: "Box" },
+  { id: "sphere", label: "Sphere" },
+  { id: "cylinder", label: "Cylinder" },
+  { id: "cone", label: "Cone" }
+];
 
 function defaultComposerScene() {
   return {
@@ -171,15 +224,39 @@ function defaultComposerMaquette(index = 1) {
     rotY: 0,
     rotZ: 0,
     scale: 1,
-    pose: "standing",
+    pose: "",
     leftUpperArm: 0,
+    leftUpperArmX: 0,
+    leftUpperArmY: 0,
+    leftUpperArmZ: 0,
     leftLowerArm: 0,
+    leftLowerArmX: 0,
+    leftLowerArmY: 0,
+    leftLowerArmZ: 0,
     rightUpperArm: 0,
+    rightUpperArmX: 0,
+    rightUpperArmY: 0,
+    rightUpperArmZ: 0,
     rightLowerArm: 0,
+    rightLowerArmX: 0,
+    rightLowerArmY: 0,
+    rightLowerArmZ: 0,
     leftUpperLeg: 0,
+    leftUpperLegX: 0,
+    leftUpperLegY: 0,
+    leftUpperLegZ: 0,
     leftLowerLeg: 0,
+    leftLowerLegX: 0,
+    leftLowerLegY: 0,
+    leftLowerLegZ: 0,
     rightUpperLeg: 0,
+    rightUpperLegX: 0,
+    rightUpperLegY: 0,
+    rightUpperLegZ: 0,
     rightLowerLeg: 0,
+    rightLowerLegX: 0,
+    rightLowerLegY: 0,
+    rightLowerLegZ: 0,
     leftHandRotX: 0,
     leftHandRotY: 0,
     leftHandRotZ: 0,
@@ -197,10 +274,13 @@ function defaultComposerMaquette(index = 1) {
   };
 }
 
-function defaultComposerProp(index = 1) {
+function defaultComposerProp(index = 1, primitive = "box") {
+  const normalizedPrimitive = normalizeComposerPrimitiveType(primitive);
+  const primitiveLabel = composerPrimitiveLabel(normalizedPrimitive);
   return {
     id: `prop-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
-    name: `Box ${index}`,
+    name: `${primitiveLabel} ${index}`,
+    primitive: normalizedPrimitive,
     x: index === 1 ? 1.6 : index * 0.6,
     y: 0,
     z: -0.45,
@@ -215,7 +295,8 @@ function defaultComposerProp(index = 1) {
   };
 }
 
-function defaultComposerImagePlane(index = 1, imageUrl = "", label = "") {
+function defaultComposerImagePlane(index = 1, imageUrl = "", label = "", aspectRatio = 16 / 9) {
+  const size = composerImagePlaneSizeForAspect(aspectRatio);
   return {
     id: `image-plane-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
     name: label || `Image Plane ${index}`,
@@ -227,8 +308,8 @@ function defaultComposerImagePlane(index = 1, imageUrl = "", label = "") {
     rotY: 0,
     rotZ: 0,
     scale: 1,
-    width: 2,
-    height: 1.125,
+    width: size.width,
+    height: size.height,
     opacity: 1
   };
 }
@@ -2789,19 +2870,42 @@ function CameraControlViewport({ imageUrl, horizontalAngle, verticalAngle, zoom,
 function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture }) {
   const viewportRef = React.useRef(null);
   const [captureStatus, setCaptureStatus] = React.useState("");
+  const [libraryPoses, setLibraryPoses] = React.useState([]);
+  const [poseStatus, setPoseStatus] = React.useState("");
   const sceneData = normalizedComposerScene(node.data.composerScene);
+  const nodeSavedPoses = normalizeComposerSavedPoses(node.data.composerSavedPoses);
+  const savedPoseOptions = mergeComposerSavedPoses(libraryPoses, nodeSavedPoses);
   const imageSources = connectedAssetItems(incoming.imageIn).filter((item) => item.type === "image" || /\.(png|jpe?g|webp|gif)$/i.test(item.url));
   const renderSceneData = resolveComposerImagePlaneSources(sceneData, imageSources);
   const composerObjects = [...sceneData.maquettes, ...sceneData.props, ...sceneData.imagePlanes];
   const rawSelectedId = node.data.composerSelectedId || "";
-  const selectedId = composerObjects.some((item) => item.id === rawSelectedId) ? rawSelectedId : sceneData.maquettes[0]?.id || sceneData.props[0]?.id || sceneData.imagePlanes[0]?.id || "";
+  const selectedId = rawSelectedId === "camera" ? "camera" : composerObjects.some((item) => item.id === rawSelectedId) ? rawSelectedId : sceneData.maquettes[0]?.id || sceneData.props[0]?.id || sceneData.imagePlanes[0]?.id || "";
   const selectedMaquette = sceneData.maquettes.find((item) => item.id === selectedId);
   const selectedProp = sceneData.props.find((item) => item.id === selectedId);
   const selectedImagePlane = sceneData.imagePlanes.find((item) => item.id === selectedId);
   const selectedObject = selectedMaquette || selectedProp || selectedImagePlane;
-  const selectedKind = selectedMaquette ? "maquette" : selectedProp ? "prop" : selectedImagePlane ? "imagePlane" : "";
+  const selectedKind = selectedId === "camera" ? "camera" : selectedMaquette ? "maquette" : selectedProp ? "prop" : selectedImagePlane ? "imagePlane" : "";
   const rawSelectedCameraBookmark = node.data.composerSelectedCameraBookmark || "";
   const activeCameraBookmark = sceneData.cameraBookmarks.find((item) => item.id === rawSelectedCameraBookmark) || sceneData.cameraBookmarks[0] || null;
+  const selectedPoseValue =
+    selectedKind === "maquette" && savedPoseOptions.some((pose) => pose.id === selectedObject?.pose) ? selectedObject.pose : "";
+  const selectedNameValue = selectedKind === "camera" ? "Camera" : selectedObject?.name || "";
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    fetchJsonApi("/api/composer-poses", { method: "GET" }, "Pose library")
+      .then(({ response, data }) => {
+        if (!cancelled && response.ok) setLibraryPoses(normalizeComposerSavedPoses(data.poses));
+      })
+      .catch(() => {
+        if (!cancelled) setLibraryPoses([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function commitScene(nextScene, extraPatch = {}) {
     onUpdate({
@@ -2836,14 +2940,15 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
     commitScene({ ...sceneData, maquettes: [...sceneData.maquettes, maquette] }, { composerSelectedId: maquette.id });
   }
 
-  function addBoxProp() {
-    const prop = defaultComposerProp(sceneData.props.length + 1);
+  function addPrimitiveProp(primitive) {
+    const prop = defaultComposerProp(sceneData.props.length + 1, primitive);
     commitScene({ ...sceneData, props: [...sceneData.props, prop] }, { composerSelectedId: prop.id });
   }
 
-  function addImagePlane() {
+  async function addImagePlane() {
     const source = imageSources[0];
-    const imagePlane = defaultComposerImagePlane(sceneData.imagePlanes.length + 1, source?.url || "", source?.label || "");
+    const aspectRatio = await composerImageAspectFromSource(source);
+    const imagePlane = defaultComposerImagePlane(sceneData.imagePlanes.length + 1, source?.url || "", source?.label || "", aspectRatio);
     commitScene({ ...sceneData, imagePlanes: [...sceneData.imagePlanes, imagePlane] }, { composerSelectedId: imagePlane.id });
   }
 
@@ -2886,6 +2991,71 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
     commitScene(nextScene, { composerSelectedCameraBookmark: nextBookmark?.id || "" });
   }
 
+  function applySavedPose(poseId) {
+    const savedPose = savedPoseOptions.find((pose) => pose.id === poseId);
+    if (!savedPose || !selectedObject) return;
+
+    const posePatch = composerSavedPosePatch(savedPose);
+    const nextScene = {
+      ...sceneData,
+      maquettes: sceneData.maquettes.map((item) => (item.id === selectedObject.id ? { ...item, ...posePatch } : item))
+    };
+
+    onUpdate({
+      composerScene: normalizedComposerScene(nextScene),
+      composerSavedPoses: mergeComposerSavedPoses(nodeSavedPoses, [savedPose])
+    });
+  }
+
+  async function saveSelectedPose() {
+    if (selectedKind !== "maquette" || !selectedObject) return;
+
+    const requestedName = window.prompt("Pose name", selectedObject.name ? `${selectedObject.name} pose` : "New pose");
+    const name = String(requestedName || "").trim();
+    if (!name) return;
+
+    const pose = normalizeComposerSavedPose({
+      id: `pose-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name,
+      ...composerPoseSnapshot(selectedObject)
+    });
+    if (!pose) return;
+
+    const nextSavedPoses = mergeComposerSavedPoses(nodeSavedPoses, [pose]);
+    const nextScene = {
+      ...sceneData,
+      maquettes: sceneData.maquettes.map((item) => (item.id === selectedObject.id ? { ...item, pose: pose.id } : item))
+    };
+
+    onUpdate({
+      composerScene: normalizedComposerScene(nextScene),
+      composerSavedPoses: nextSavedPoses
+    });
+    setPoseStatus(`Saved "${pose.name}" to this Composer.`);
+
+    try {
+      const { response, data } = await fetchJsonApi("/api/composer-poses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pose })
+      }, "Pose save");
+      if (!response.ok) throw new Error(data.error || "Could not save the pose library file.");
+
+      const savedPose = normalizeComposerSavedPose(data.pose || pose);
+      const library = normalizeComposerSavedPoses(data.poses);
+      const nextLibraryPoses = library.length ? library : mergeComposerSavedPoses(libraryPoses, [savedPose]);
+
+      setLibraryPoses(nextLibraryPoses);
+      onUpdate({
+        composerSavedPoses: mergeComposerSavedPoses(nextSavedPoses, [savedPose])
+      });
+      setPoseStatus(`Saved "${savedPose.name}" to this Composer and public/models/poses.`);
+    } catch (error) {
+      setPoseStatus(`Saved "${pose.name}" to this Composer. Library save failed until the backend is restarted.`);
+      console.warn(error);
+    }
+  }
+
   function removeSelected() {
     if (!selectedObject) return;
     const nextMaquettes = sceneData.maquettes.filter((item) => item.id !== selectedObject.id);
@@ -2898,7 +3068,7 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
         props: nextProps,
         imagePlanes: nextImagePlanes
       },
-      { composerSelectedId: nextMaquettes[0]?.id || nextProps[0]?.id || nextImagePlanes[0]?.id || "" }
+      { composerSelectedId: nextMaquettes[0]?.id || nextProps[0]?.id || nextImagePlanes[0]?.id || "camera" }
     );
   }
 
@@ -2961,92 +3131,138 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
           <aside className="composer-controls">
             <div className="composer-control-row trio">
               <button onClick={addMaquette}>Add Maquette</button>
-              <button onClick={addBoxProp}>Add Box</button>
+              <select value="" onChange={(event) => event.target.value && addPrimitiveProp(event.target.value)} title="Add primitive">
+                <option value="">Add Primitive</option>
+                {composerPrimitiveOptions.map((primitive) => (
+                  <option key={primitive.id} value={primitive.id}>
+                    {primitive.label}
+                  </option>
+                ))}
+              </select>
               <button onClick={addImagePlane} disabled={!imageSources.length} title={imageSources.length ? "Add connected image plane" : "Connect an image to Composer"}>
                 Add Plane
               </button>
             </div>
 
-            <label className="composer-field">
-              <span>Selection</span>
-              <select value={selectedId} onChange={(event) => onUpdate({ composerSelectedId: event.target.value })}>
-                {sceneData.maquettes.map((item, index) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name || `Maquette ${index + 1}`}
-                  </option>
-                ))}
-                {sceneData.props.map((item, index) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name || `Box ${index + 1}`}
-                  </option>
-                ))}
-                {sceneData.imagePlanes.map((item, index) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name || `Image Plane ${index + 1}`}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div className="composer-selection-panel">
+              <label className="composer-field highlighted">
+                <span>Selection</span>
+                <select value={selectedId} onChange={(event) => onUpdate({ composerSelectedId: event.target.value })}>
+                  <option value="camera">Camera</option>
+                  {sceneData.maquettes.map((item, index) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name || `Maquette ${index + 1}`}
+                    </option>
+                  ))}
+                  {sceneData.props.map((item, index) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name || `${composerPrimitiveLabel(item.primitive)} ${index + 1}`}
+                    </option>
+                  ))}
+                  {sceneData.imagePlanes.map((item, index) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name || `Image Plane ${index + 1}`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="composer-field highlighted">
+                <span>Name</span>
+                <input value={selectedNameValue} disabled={selectedKind === "camera"} onChange={(event) => patchSelected({ name: event.target.value })} />
+              </label>
+            </div>
 
-            {selectedObject ? (
+            {selectedKind === "camera" ? (
+              <div className="composer-camera-panel">
+                <div className="composer-camera-bookmarks">
+                  <button type="button" onClick={() => stepCameraBookmark(-1)} disabled={!sceneData.cameraBookmarks.length} title="Previous camera bookmark" aria-label="Previous camera bookmark">
+                    <ChevronLeft size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    className="composer-camera-bookmark-current"
+                    onClick={() => activeCameraBookmark && recallCameraBookmark(activeCameraBookmark.id)}
+                    disabled={!activeCameraBookmark}
+                    title={activeCameraBookmark ? "Recall camera bookmark" : "No camera bookmarks"}
+                  >
+                    {activeCameraBookmark?.name || "Cam 0"}
+                  </button>
+                  <button type="button" onClick={() => stepCameraBookmark(1)} disabled={!sceneData.cameraBookmarks.length} title="Next camera bookmark" aria-label="Next camera bookmark">
+                    <ChevronRight size={15} />
+                  </button>
+                  <button type="button" onClick={saveCameraBookmark} title="Save current camera" aria-label="Save current camera">
+                    <Save size={15} />
+                  </button>
+                  <button type="button" onClick={deleteCameraBookmark} disabled={!activeCameraBookmark} title="Delete camera bookmark" aria-label="Delete camera bookmark">
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+                <ComposerVectorRange label="Location" value={{ x: sceneData.camera.x, y: sceneData.camera.y, z: sceneData.camera.z }} step="0.05" onChange={(value) => patchCamera({ x: value.x, y: value.y, z: value.z })} />
+                <ComposerRange label="Yaw" min="-360" max="360" step="1" value={sceneData.camera.yaw} onChange={(value) => patchCamera({ yaw: value })} />
+                <ComposerRange label="Pitch" min="-82" max="82" step="1" value={sceneData.camera.pitch} onChange={(value) => patchCamera({ pitch: value })} />
+                <ComposerRange label="Lens" step="1" value={sceneData.camera.fov} onChange={(value) => patchCamera({ fov: value })} />
+              </div>
+            ) : selectedObject ? (
               <>
-                <label className="composer-field">
-                  <span>Name</span>
-                  <input value={selectedObject.name || ""} onChange={(event) => patchSelected({ name: event.target.value })} />
-                </label>
                 {selectedKind === "maquette" && (
                   <label className="composer-field">
                     <span>Color</span>
                     <input type="color" value={selectedObject.color || "#b8b8b2"} onChange={(event) => patchSelected({ color: event.target.value })} />
                   </label>
                 )}
-                <ComposerRange label="X" step="0.05" value={selectedObject.x} onChange={(value) => patchSelected({ x: value })} />
-                <ComposerRange label="Y" step="0.05" value={selectedObject.y} onChange={(value) => patchSelected({ y: value })} />
-                <ComposerRange label="Z" step="0.05" value={selectedObject.z} onChange={(value) => patchSelected({ z: value })} />
-                <ComposerRange label="Rot X" min="-360" max="360" step="1" value={selectedObject.rotX} onChange={(value) => patchSelected({ rotX: value })} />
-                <ComposerRange label="Rot Y" min="-360" max="360" step="1" value={selectedObject.rotY} onChange={(value) => patchSelected({ rotY: value })} />
-                <ComposerRange label="Rot Z" min="-360" max="360" step="1" value={selectedObject.rotZ} onChange={(value) => patchSelected({ rotZ: value })} />
+                <ComposerVectorRange label="Location" value={{ x: selectedObject.x, y: selectedObject.y, z: selectedObject.z }} step="0.05" onChange={(value) => patchSelected({ x: value.x, y: value.y, z: value.z })} />
+                <ComposerRotationVectorRange label="Rotation" value={{ x: THREE.MathUtils.degToRad(finiteNumber(selectedObject.rotX, 0)), y: THREE.MathUtils.degToRad(finiteNumber(selectedObject.rotY, 0)), z: THREE.MathUtils.degToRad(finiteNumber(selectedObject.rotZ, 0)) }} onChange={(value) => patchSelected({ rotX: THREE.MathUtils.radToDeg(value.x), rotY: THREE.MathUtils.radToDeg(value.y), rotZ: THREE.MathUtils.radToDeg(value.z) })} />
                 <ComposerRange label="Scale" step="0.05" value={selectedObject.scale} onChange={(value) => patchSelected({ scale: value })} />
 
                 {selectedKind === "maquette" ? (
                   <>
-                    <label className="composer-field">
-                      <span>Pose</span>
-                      <select value={selectedObject.pose || "standing"} onChange={(event) => patchSelected(composerPosePreset(event.target.value))}>
-                        <option value="standing">Standing</option>
-                        <option value="walk">Walk</option>
-                        <option value="run">Run</option>
-                        <option value="lean">Lean</option>
-                        <option value="reach">Reach</option>
-                      </select>
-                    </label>
-                    <ComposerRotationRange label="L Upper Arm" value={selectedObject.leftUpperArm} onChange={(value) => patchSelected({ leftUpperArm: value })} />
-                    <ComposerRotationRange label="L Lower Arm" value={selectedObject.leftLowerArm} onChange={(value) => patchSelected({ leftLowerArm: value })} />
-                    <ComposerRotationRange label="R Upper Arm" value={selectedObject.rightUpperArm} onChange={(value) => patchSelected({ rightUpperArm: value })} />
-                    <ComposerRotationRange label="R Lower Arm" value={selectedObject.rightLowerArm} onChange={(value) => patchSelected({ rightLowerArm: value })} />
-                    <ComposerRotationRange label="L Upper Leg" value={selectedObject.leftUpperLeg} onChange={(value) => patchSelected({ leftUpperLeg: value })} />
-                    <ComposerRotationRange label="L Lower Leg" value={selectedObject.leftLowerLeg} onChange={(value) => patchSelected({ leftLowerLeg: value })} />
-                    <ComposerRotationRange label="R Upper Leg" value={selectedObject.rightUpperLeg} onChange={(value) => patchSelected({ rightUpperLeg: value })} />
-                    <ComposerRotationRange label="R Lower Leg" value={selectedObject.rightLowerLeg} onChange={(value) => patchSelected({ rightLowerLeg: value })} />
-                    <ComposerRotationRange label="L Hand X" value={selectedObject.leftHandRotX} onChange={(value) => patchSelected({ leftHandRotX: value })} />
-                    <ComposerRotationRange label="L Hand Y" value={selectedObject.leftHandRotY} onChange={(value) => patchSelected({ leftHandRotY: value })} />
-                    <ComposerRotationRange label="L Hand Z" value={selectedObject.leftHandRotZ} onChange={(value) => patchSelected({ leftHandRotZ: value })} />
-                    <ComposerRotationRange label="R Hand X" value={selectedObject.rightHandRotX} onChange={(value) => patchSelected({ rightHandRotX: value })} />
-                    <ComposerRotationRange label="R Hand Y" value={selectedObject.rightHandRotY} onChange={(value) => patchSelected({ rightHandRotY: value })} />
-                    <ComposerRotationRange label="R Hand Z" value={selectedObject.rightHandRotZ} onChange={(value) => patchSelected({ rightHandRotZ: value })} />
-                    <ComposerRotationRange label="Head X" value={selectedObject.headRotX} onChange={(value) => patchSelected({ headRotX: value })} />
-                    <ComposerRotationRange label="Head Y" value={selectedObject.headRotY} onChange={(value) => patchSelected({ headRotY: value })} />
-                    <ComposerRotationRange label="Head Z" value={selectedObject.headRotZ} onChange={(value) => patchSelected({ headRotZ: value })} />
-                    <ComposerRotationRange label="Upper Body X" value={selectedObject.upperBodyRotX} onChange={(value) => patchSelected({ upperBodyRotX: value })} />
-                    <ComposerRotationRange label="Upper Body Y" value={selectedObject.upperBodyRotY} onChange={(value) => patchSelected({ upperBodyRotY: value })} />
-                    <ComposerRotationRange label="Upper Body Z" value={selectedObject.upperBodyRotZ} onChange={(value) => patchSelected({ upperBodyRotZ: value })} />
-                    <ComposerRotationRange label="Lean" value={selectedObject.lean} onChange={(value) => patchSelected({ lean: value })} />
+                    <div className="composer-control-row pose-save">
+                      <label className="composer-field highlighted">
+                        <span>Pose</span>
+                        <select value={selectedPoseValue} onChange={(event) => applySavedPose(event.target.value)}>
+                          <option value="" disabled>
+                            {savedPoseOptions.length ? "Select pose" : "No saved poses"}
+                          </option>
+                          {savedPoseOptions.map((pose) => (
+                            <option key={pose.id} value={pose.id}>
+                              {pose.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button type="button" onClick={saveSelectedPose}>
+                        Save
+                      </button>
+                    </div>
+                    {poseStatus && <div className="composer-status">{poseStatus}</div>}
+                    <ComposerRotationVectorRange label="L Upper Arm" value={composerRotationVector(selectedObject, "leftUpperArm")} onChange={(value) => patchSelected(composerRotationVectorPatch("leftUpperArm", value))} />
+                    <ComposerRotationVectorRange label="L Lower Arm" value={composerRotationVector(selectedObject, "leftLowerArm")} onChange={(value) => patchSelected(composerRotationVectorPatch("leftLowerArm", value))} />
+                    <ComposerRotationVectorRange label="R Upper Arm" value={composerRotationVector(selectedObject, "rightUpperArm")} onChange={(value) => patchSelected(composerRotationVectorPatch("rightUpperArm", value))} />
+                    <ComposerRotationVectorRange label="R Lower Arm" value={composerRotationVector(selectedObject, "rightLowerArm")} onChange={(value) => patchSelected(composerRotationVectorPatch("rightLowerArm", value))} />
+                    <ComposerRotationVectorRange label="L Upper Leg" value={composerRotationVector(selectedObject, "leftUpperLeg")} onChange={(value) => patchSelected(composerRotationVectorPatch("leftUpperLeg", value))} />
+                    <ComposerRotationVectorRange label="L Lower Leg" value={composerRotationVector(selectedObject, "leftLowerLeg")} onChange={(value) => patchSelected(composerRotationVectorPatch("leftLowerLeg", value))} />
+                    <ComposerRotationVectorRange label="R Upper Leg" value={composerRotationVector(selectedObject, "rightUpperLeg")} onChange={(value) => patchSelected(composerRotationVectorPatch("rightUpperLeg", value))} />
+                    <ComposerRotationVectorRange label="R Lower Leg" value={composerRotationVector(selectedObject, "rightLowerLeg")} onChange={(value) => patchSelected(composerRotationVectorPatch("rightLowerLeg", value))} />
+                    <ComposerRotationVectorRange label="L Hand" value={composerRotationVector(selectedObject, "leftHandRot")} onChange={(value) => patchSelected(composerRotationVectorPatch("leftHandRot", value, false))} />
+                    <ComposerRotationVectorRange label="R Hand" value={composerRotationVector(selectedObject, "rightHandRot")} onChange={(value) => patchSelected(composerRotationVectorPatch("rightHandRot", value, false))} />
+                    <ComposerRotationVectorRange label="Head" value={composerRotationVector(selectedObject, "headRot")} onChange={(value) => patchSelected(composerRotationVectorPatch("headRot", value, false))} />
+                    <ComposerRotationVectorRange label="Upper Body" value={composerRotationVector(selectedObject, "upperBodyRot")} onChange={(value) => patchSelected(composerRotationVectorPatch("upperBodyRot", value, false))} />
                   </>
                 ) : selectedKind === "prop" ? (
                   <>
                     <label className="composer-field">
                       <span>Color</span>
                       <input type="color" value={selectedObject.color || "#496b8f"} onChange={(event) => patchSelected({ color: event.target.value })} />
+                    </label>
+                    <label className="composer-field">
+                      <span>Primitive</span>
+                      <select value={selectedObject.primitive || "box"} onChange={(event) => patchSelected({ primitive: event.target.value })}>
+                        {composerPrimitiveOptions.map((primitive) => (
+                          <option key={primitive.id} value={primitive.id}>
+                            {primitive.label}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                     <ComposerRange label="Width" min="0.25" max="4" step="0.05" value={selectedObject.width} onChange={(value) => patchSelected({ width: value })} />
                     <ComposerRange label="Height" min="0.25" max="4" step="0.05" value={selectedObject.height} onChange={(value) => patchSelected({ height: value })} />
@@ -3082,39 +3298,6 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
               <div className="composer-empty-selection">Add a maquette or box to begin blocking.</div>
             )}
 
-            <div className="composer-camera-panel">
-              <strong>Camera</strong>
-              <div className="composer-camera-bookmarks">
-                <button type="button" onClick={() => stepCameraBookmark(-1)} disabled={!sceneData.cameraBookmarks.length} title="Previous camera bookmark" aria-label="Previous camera bookmark">
-                  <ChevronLeft size={15} />
-                </button>
-                <button
-                  type="button"
-                  className="composer-camera-bookmark-current"
-                  onClick={() => activeCameraBookmark && recallCameraBookmark(activeCameraBookmark.id)}
-                  disabled={!activeCameraBookmark}
-                  title={activeCameraBookmark ? "Recall camera bookmark" : "No camera bookmarks"}
-                >
-                  {activeCameraBookmark?.name || "Cam 0"}
-                </button>
-                <button type="button" onClick={() => stepCameraBookmark(1)} disabled={!sceneData.cameraBookmarks.length} title="Next camera bookmark" aria-label="Next camera bookmark">
-                  <ChevronRight size={15} />
-                </button>
-                <button type="button" onClick={saveCameraBookmark} title="Save current camera" aria-label="Save current camera">
-                  <Save size={15} />
-                </button>
-                <button type="button" onClick={deleteCameraBookmark} disabled={!activeCameraBookmark} title="Delete camera bookmark" aria-label="Delete camera bookmark">
-                  <Trash2 size={15} />
-                </button>
-              </div>
-              <ComposerRange label="X" step="0.05" value={sceneData.camera.x} onChange={(value) => patchCamera({ x: value })} />
-              <ComposerRange label="Y" step="0.05" value={sceneData.camera.y} onChange={(value) => patchCamera({ y: value })} />
-              <ComposerRange label="Z" step="0.05" value={sceneData.camera.z} onChange={(value) => patchCamera({ z: value })} />
-              <ComposerRange label="Yaw" min="-360" max="360" step="1" value={sceneData.camera.yaw} onChange={(value) => patchCamera({ yaw: value })} />
-              <ComposerRange label="Pitch" min="-82" max="82" step="1" value={sceneData.camera.pitch} onChange={(value) => patchCamera({ pitch: value })} />
-              <ComposerRange label="Lens" min="18" max="80" step="1" value={sceneData.camera.fov} onChange={(value) => patchCamera({ fov: value })} />
-            </div>
-
             {captureStatus && <small className="composer-status">{captureStatus}</small>}
           </aside>
         </main>
@@ -3123,7 +3306,7 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
   );
 }
 
-function ComposerRange({ label, value, min, max, step, onChange }) {
+function ComposerScrubInput({ label, value, min, max, step, axis, onChange }) {
   const numericValue = finiteNumber(value, 0);
   const minNumber = Number(min);
   const maxNumber = Number(max);
@@ -3131,7 +3314,7 @@ function ComposerRange({ label, value, min, max, step, onChange }) {
   const hasMax = max !== undefined && max !== null && max !== "" && Number.isFinite(maxNumber);
   const stepValue = Math.max(finiteNumber(step, 1), 0.0001);
   const precision = composerStepPrecision(stepValue);
-  const axis = composerAxisForLabel(label);
+  const scrubAxis = axis || composerAxisForLabel(label);
   const inputRef = React.useRef(null);
   const dragRef = React.useRef(null);
   const editingRef = React.useRef(false);
@@ -3220,26 +3403,32 @@ function ComposerRange({ label, value, min, max, step, onChange }) {
   }
 
   return (
+    <span className={`composer-scrub-input ${dragging ? "dragging" : ""}`} style={{ "--axis-color": composerAxisColor(scrubAxis) }}>
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="decimal"
+        value={draftValue}
+        onChange={(event) => setDraftValue(event.target.value)}
+        onFocus={handleFocus}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        title="Type a value, or drag left/right to slide"
+        aria-label={label}
+      />
+    </span>
+  );
+}
+
+function ComposerRange({ label, value, min, max, step, onChange }) {
+  return (
     <label className="composer-field scrub">
       <span>{label}</span>
-      <span className={`composer-scrub-input ${dragging ? "dragging" : ""}`} style={{ "--axis-color": composerAxisColor(axis) }}>
-        <input
-          ref={inputRef}
-          type="text"
-          inputMode="decimal"
-          value={draftValue}
-          onChange={(event) => setDraftValue(event.target.value)}
-          onFocus={handleFocus}
-          onBlur={handleBlur}
-          onKeyDown={handleKeyDown}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          title="Type a value, or drag left/right to slide"
-          aria-label={label}
-        />
-      </span>
+      <ComposerScrubInput label={label} value={value} min={min} max={max} step={step} onChange={onChange} />
     </label>
   );
 }
@@ -3256,6 +3445,84 @@ function ComposerRotationRange({ label, value, onChange }) {
       onChange={(nextDegrees) => onChange(THREE.MathUtils.degToRad(nextDegrees))}
     />
   );
+}
+
+function ComposerVectorRange({ label, value, step = "0.05", onChange }) {
+  const vector = {
+    x: finiteNumber(value?.x, 0),
+    y: finiteNumber(value?.y, 0),
+    z: finiteNumber(value?.z, 0)
+  };
+  const patchAxis = (axis) => (nextValue) => {
+    onChange({
+      ...vector,
+      [axis]: nextValue
+    });
+  };
+
+  return (
+    <label className="composer-field scrub vector">
+      <span>{label}</span>
+      <span className="composer-vector-inputs">
+        <ComposerScrubInput label={`${label} X`} axis="x" step={step} value={vector.x} onChange={patchAxis("x")} />
+        <ComposerScrubInput label={`${label} Y`} axis="y" step={step} value={vector.y} onChange={patchAxis("y")} />
+        <ComposerScrubInput label={`${label} Z`} axis="z" step={step} value={vector.z} onChange={patchAxis("z")} />
+      </span>
+    </label>
+  );
+}
+
+function ComposerRotationVectorRange({ label, value, onChange }) {
+  const degrees = {
+    x: THREE.MathUtils.radToDeg(finiteNumber(value?.x, 0)),
+    y: THREE.MathUtils.radToDeg(finiteNumber(value?.y, 0)),
+    z: THREE.MathUtils.radToDeg(finiteNumber(value?.z, 0))
+  };
+  const patchAxis = (axis) => (nextDegrees) => {
+    onChange({
+      ...value,
+      [axis]: THREE.MathUtils.degToRad(nextDegrees)
+    });
+  };
+
+  return (
+    <label className="composer-field scrub vector">
+      <span>{label}</span>
+      <span className="composer-vector-inputs">
+        <ComposerScrubInput label={`${label} X`} axis="x" min="-360" max="360" step="1" value={degrees.x} onChange={patchAxis("x")} />
+        <ComposerScrubInput label={`${label} Y`} axis="y" min="-360" max="360" step="1" value={degrees.y} onChange={patchAxis("y")} />
+        <ComposerScrubInput label={`${label} Z`} axis="z" min="-360" max="360" step="1" value={degrees.z} onChange={patchAxis("z")} />
+      </span>
+    </label>
+  );
+}
+
+function composerRotationVector(item, key, legacyZ = 0) {
+  const zFallback = finiteNumber(item?.[key], legacyZ);
+  return {
+    x: finiteNumber(item?.[`${key}X`], 0),
+    y: finiteNumber(item?.[`${key}Y`], 0),
+    z: finiteNumber(item?.[`${key}Z`], zFallback)
+  };
+}
+
+function composerRotationVectorPatch(key, value, includeLegacy = true) {
+  const vector = {
+    x: finiteNumber(value?.x, 0),
+    y: finiteNumber(value?.y, 0),
+    z: finiteNumber(value?.z, 0)
+  };
+  const patch = {
+    [`${key}X`]: vector.x,
+    [`${key}Y`]: vector.y,
+    [`${key}Z`]: vector.z
+  };
+  if (includeLegacy) patch[key] = vector.z;
+  return patch;
+}
+
+function composerRotationFields(item, key, legacyZ = 0) {
+  return composerRotationVectorPatch(key, composerRotationVector(item, key, legacyZ));
 }
 
 function composerAxisForLabel(label = "") {
@@ -3307,7 +3574,8 @@ const ComposerViewport = React.forwardRef(function ComposerViewport({ sceneData,
         return renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, "", {
           showGrid: false,
           showSelection: false,
-          awaitTextures: true
+          awaitTextures: true,
+          awaitAssets: true
         }).then(() => {
           const imageDataUrl = renderer.domElement.toDataURL("image/png");
           renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, stateRef.current.selectedId);
@@ -3467,7 +3735,7 @@ const ComposerViewport = React.forwardRef(function ComposerViewport({ sceneData,
   }, []);
 
   return (
-    <div className="composer-viewport-shell" style={{ aspectRatio: composerAspectRatioValue(aspectRatio) }} ref={mountRef}>
+    <div className="composer-viewport-shell" style={{ aspectRatio: composerAspectRatioValue(aspectRatio), "--composer-aspect": composerAspectRatioNumber(aspectRatio) }} ref={mountRef}>
       {showGuides && <div className="composer-guides" aria-hidden="true" />}
     </div>
   );
@@ -4771,6 +5039,7 @@ function createDefaultNodeData(type, label, count) {
       composerAspectRatio: "16:9",
       composerShowGuides: true,
       composerSelectedId: composerScene.maquettes[0]?.id || "",
+      composerSavedPoses: [],
       composerScene
     };
   }
@@ -5233,9 +5502,11 @@ async function fetchJsonApi(path, options, label) {
           ? "utilityVideo"
           : path.includes("composer-frame")
             ? "composerFrame"
+            : path.includes("composer-poses")
+              ? "composerPoses"
             : "";
       if (!healthResponse.ok || (routeKey && !healthData?.routes?.[routeKey])) {
-        throw new Error("The backend is running, but it does not have the updated Utility routes.");
+        throw new Error("The backend is running, but it does not have the updated API routes.");
       }
 
       const retryResponse = await fetch(`http://127.0.0.1:3333${path}`, options);
@@ -5693,6 +5964,48 @@ function composerAspectRatioValue(value) {
   return composerAspectRatios[normalizeComposerAspectRatio(value)];
 }
 
+function composerAspectRatioNumber(value) {
+  const [width = 16, height = 9] = normalizeComposerAspectRatio(value).split(":").map(Number);
+  return width / height;
+}
+
+function normalizeComposerPrimitiveType(value) {
+  const primitive = String(value || "box");
+  return composerPrimitiveOptions.some((option) => option.id === primitive) ? primitive : "box";
+}
+
+function composerPrimitiveLabel(value) {
+  return composerPrimitiveOptions.find((option) => option.id === normalizeComposerPrimitiveType(value))?.label || "Box";
+}
+
+function composerImagePlaneSizeForAspect(aspectRatio) {
+  const ratio = Math.max(0.05, finiteNumber(aspectRatio, 16 / 9));
+  const maxSide = 2;
+  if (ratio >= 1) {
+    return {
+      width: maxSide,
+      height: maxSide / ratio
+    };
+  }
+
+  return {
+    width: maxSide * ratio,
+    height: maxSide
+  };
+}
+
+async function composerImageAspectFromSource(source) {
+  if (source?.width && source?.height) return finiteNumber(source.width, 16) / Math.max(1, finiteNumber(source.height, 9));
+  if (!source?.url) return 16 / 9;
+
+  try {
+    const image = await loadCanvasImage(source.url);
+    return image.naturalWidth / Math.max(1, image.naturalHeight);
+  } catch {
+    return 16 / 9;
+  }
+}
+
 function normalizedComposerScene(scene = null) {
   const fallback = defaultComposerScene();
   const hasScene = scene && typeof scene === "object";
@@ -5743,15 +6056,15 @@ function normalizedComposerScene(scene = null) {
         rotY: finiteNumber(item?.rotY, finiteNumber(item?.yaw, 0)),
         rotZ: finiteNumber(item?.rotZ, 0),
         scale: finiteNumber(item?.scale, 1),
-        pose: composerPosePresets[item?.pose] ? item.pose : "standing",
-        leftUpperArm: finiteNumber(item?.leftUpperArm, legacyUpperArm),
-        leftLowerArm: finiteNumber(item?.leftLowerArm, legacyLowerArm),
-        rightUpperArm: finiteNumber(item?.rightUpperArm, -legacyUpperArm),
-        rightLowerArm: finiteNumber(item?.rightLowerArm, -legacyLowerArm),
-        leftUpperLeg: finiteNumber(item?.leftUpperLeg, legacyUpperLeg),
-        leftLowerLeg: finiteNumber(item?.leftLowerLeg, legacyLowerLeg),
-        rightUpperLeg: finiteNumber(item?.rightUpperLeg, -legacyUpperLeg),
-        rightLowerLeg: finiteNumber(item?.rightLowerLeg, -legacyLowerLeg),
+        pose: String(item?.pose || ""),
+        ...composerRotationFields(item, "leftUpperArm", legacyUpperArm),
+        ...composerRotationFields(item, "leftLowerArm", legacyLowerArm),
+        ...composerRotationFields(item, "rightUpperArm", -legacyUpperArm),
+        ...composerRotationFields(item, "rightLowerArm", -legacyLowerArm),
+        ...composerRotationFields(item, "leftUpperLeg", legacyUpperLeg),
+        ...composerRotationFields(item, "leftLowerLeg", legacyLowerLeg),
+        ...composerRotationFields(item, "rightUpperLeg", -legacyUpperLeg),
+        ...composerRotationFields(item, "rightLowerLeg", -legacyLowerLeg),
         leftHandRotX: finiteNumber(item?.leftHandRotX, legacyHandRotX),
         leftHandRotY: finiteNumber(item?.leftHandRotY, legacyHandRotY),
         leftHandRotZ: finiteNumber(item?.leftHandRotZ, -legacyHandRotZ),
@@ -5770,7 +6083,8 @@ function normalizedComposerScene(scene = null) {
     }),
     props: propSource.map((item, index) => ({
       id: String(item?.id || `prop-${index + 1}`),
-      name: String(item?.name || `Box ${index + 1}`),
+      name: String(item?.name || `${composerPrimitiveLabel(item?.primitive)} ${index + 1}`),
+      primitive: normalizeComposerPrimitiveType(item?.primitive || item?.shape),
       x: finiteNumber(item?.x, 1.4),
       y: finiteNumber(item?.y, 0),
       z: finiteNumber(item?.z, -0.4),
@@ -5815,19 +6129,59 @@ function normalizedComposerScene(scene = null) {
   };
 }
 
-function composerPosePreset(pose) {
-  const preset = composerPosePresets[pose] || composerPosePresets.standing;
+function composerPoseSnapshot(source = {}) {
+  return composerPoseFieldKeys.reduce((snapshot, key) => {
+    snapshot[key] = finiteNumber(source?.[key], 0);
+    return snapshot;
+  }, {});
+}
+
+function normalizeComposerSavedPose(pose, index = 0) {
+  if (!pose || typeof pose !== "object") return null;
+  const fallbackId = `pose-${index + 1}`;
+  const id = String(pose.id || pose.fileName || fallbackId).replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 96) || fallbackId;
+  const name = String(pose.name || `Pose ${index + 1}`).trim() || `Pose ${index + 1}`;
   return {
-    pose: preset.pose,
-    leftUpperArm: preset.upperArm,
-    leftLowerArm: preset.lowerArm,
-    rightUpperArm: -preset.upperArm,
-    rightLowerArm: -preset.lowerArm,
-    leftUpperLeg: preset.upperLeg,
-    leftLowerLeg: preset.lowerLeg,
-    rightUpperLeg: -preset.upperLeg,
-    rightLowerLeg: -preset.lowerLeg,
-    lean: preset.lean
+    id,
+    name,
+    fileName: String(pose.fileName || ""),
+    pose: String(pose.pose || id),
+    ...composerPoseSnapshot(pose)
+  };
+}
+
+function normalizeComposerSavedPoses(poses = []) {
+  if (!Array.isArray(poses)) return [];
+  return poses.map((pose, index) => normalizeComposerSavedPose(pose, index)).filter(Boolean);
+}
+
+function mergeComposerSavedPoses(...poseLists) {
+  const merged = [];
+  const flattened = poseLists.flatMap((list) => (Array.isArray(list) ? list : [list])).filter(Boolean);
+
+  flattened.forEach((pose, index) => {
+    const normalized = normalizeComposerSavedPose(pose, index);
+    if (!normalized) return;
+    const existingIndex = merged.findIndex((item) => item.id === normalized.id);
+    if (existingIndex >= 0) {
+      merged[existingIndex] = {
+        ...merged[existingIndex],
+        ...normalized
+      };
+    } else {
+      merged.push(normalized);
+    }
+  });
+
+  return merged;
+}
+
+function composerSavedPosePatch(pose) {
+  const normalized = normalizeComposerSavedPose(pose);
+  if (!normalized) return {};
+  return {
+    pose: normalized.id,
+    ...composerPoseSnapshot(normalized)
   };
 }
 
@@ -5858,6 +6212,7 @@ function renderComposerViewport(renderer, scene, camera, sceneData, selectedId, 
   const showGrid = options.showGrid !== false;
   const showSelection = options.showSelection !== false;
   const texturePromises = [];
+  const assetPromises = [];
   const data = normalizedComposerScene(sceneData);
   disposeComposerScene(scene);
   scene.clear();
@@ -5894,7 +6249,7 @@ function renderComposerViewport(renderer, scene, camera, sceneData, selectedId, 
   [
     ...data.imagePlanes.map((plane) => createComposerImagePlane(plane, renderer, scene, camera, { texturePromises })),
     ...data.props.map(createComposerProp),
-    ...data.maquettes.map(createComposerMaquette)
+    ...data.maquettes.map((maquette) => createComposerMaquette(maquette, { assetPromises }))
   ].forEach((object) => {
     scene.add(object);
     if (showSelection && object.userData.id === selectedId) {
@@ -5904,9 +6259,18 @@ function renderComposerViewport(renderer, scene, camera, sceneData, selectedId, 
   });
 
   renderer.render(scene, camera);
-  if (options.awaitTextures) {
-    return Promise.allSettled(texturePromises).then(() => {
+  if (options.awaitTextures || options.awaitAssets) {
+    return Promise.allSettled([...texturePromises, ...assetPromises]).then(() => {
+      if (assetPromises.length) {
+        return renderComposerViewport(renderer, scene, camera, sceneData, selectedId, { ...options, awaitAssets: false });
+      }
       renderer.render(scene, camera);
+    });
+  }
+
+  if (assetPromises.length) {
+    Promise.allSettled(assetPromises).then(() => {
+      renderComposerViewport(renderer, scene, camera, sceneData, selectedId, options);
     });
   }
 }
@@ -5930,12 +6294,26 @@ function createComposerProp(prop) {
   group.position.set(prop.x, prop.y + (prop.height * prop.scale) / 2, prop.z);
   group.rotation.set(THREE.MathUtils.degToRad(prop.rotX), THREE.MathUtils.degToRad(prop.rotY), THREE.MathUtils.degToRad(prop.rotZ));
   const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(prop.width, prop.height, prop.depth),
+    createComposerPrimitiveGeometry(prop.primitive),
     new THREE.MeshStandardMaterial({ color: new THREE.Color(prop.color), roughness: 0.74 })
   );
-  mesh.scale.setScalar(prop.scale);
+  mesh.scale.set(prop.width * prop.scale, prop.height * prop.scale, prop.depth * prop.scale);
   group.add(mesh);
   return group;
+}
+
+function createComposerPrimitiveGeometry(primitive) {
+  switch (normalizeComposerPrimitiveType(primitive)) {
+    case "sphere":
+      return new THREE.SphereGeometry(0.5, 32, 18);
+    case "cylinder":
+      return new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
+    case "cone":
+      return new THREE.ConeGeometry(0.5, 1, 32);
+    case "box":
+    default:
+      return new THREE.BoxGeometry(1, 1, 1);
+  }
 }
 
 function createComposerImagePlane(plane, renderer, scene, camera, options = {}) {
@@ -5995,7 +6373,147 @@ function composerTextureUrl(url) {
   return new URL(url, window.location.origin).href;
 }
 
-function createComposerMaquette(maquette) {
+function createComposerMaquette(maquette, options = {}) {
+  if (composerMannequinAsset?.scene) {
+    return createComposerModelMaquette(maquette, composerMannequinAsset);
+  }
+
+  if (!composerMannequinAssetFailed) {
+    options.assetPromises?.push(loadComposerMannequinAsset());
+  }
+
+  return createComposerProceduralMaquette(maquette);
+}
+
+function loadComposerMannequinAsset() {
+  if (composerMannequinAsset) return Promise.resolve(composerMannequinAsset);
+  if (composerMannequinAssetFailed) return Promise.resolve(null);
+
+  if (!composerMannequinAssetPromise) {
+    const loader = new GLTFLoader();
+    composerMannequinAssetPromise = loader
+      .loadAsync(composerMannequinModelPath)
+      .then((gltf) => {
+        const scene = gltf.scene || gltf.scenes?.[0];
+        if (!scene) throw new Error("Mannequin GLB has no scene.");
+        scene.updateMatrixWorld(true);
+        composerMannequinAsset = { scene };
+        return composerMannequinAsset;
+      })
+      .catch((error) => {
+        composerMannequinAssetFailed = true;
+        console.warn("Composer mannequin model failed to load.", error);
+        return null;
+      });
+  }
+
+  return composerMannequinAssetPromise;
+}
+
+function createComposerModelMaquette(maquette, asset) {
+  const group = new THREE.Group();
+  group.userData.id = maquette.id;
+  applyComposerObjectTransform(group, maquette);
+
+  const poseRoot = new THREE.Group();
+  poseRoot.rotation.x = maquette.lean;
+  group.add(poseRoot);
+
+  const model = cloneSkeleton(asset.scene);
+  model.scale.setScalar(composerMannequinModelScale);
+  prepareComposerMannequinClone(model, maquette);
+  applyComposerMannequinPose(model, maquette);
+  poseRoot.add(model);
+
+  return group;
+}
+
+function applyComposerObjectTransform(group, object) {
+  group.position.set(object.x, object.y, object.z);
+  group.rotation.set(THREE.MathUtils.degToRad(object.rotX), THREE.MathUtils.degToRad(object.rotY), THREE.MathUtils.degToRad(object.rotZ));
+  group.scale.setScalar(object.scale);
+}
+
+function prepareComposerMannequinClone(model, maquette) {
+  const color = new THREE.Color(maquette.color || "#b8b8b2");
+  model.traverse((object) => {
+    object.frustumCulled = false;
+    if (!object.isMesh && !object.isSkinnedMesh) return;
+
+    object.castShadow = true;
+    object.receiveShadow = true;
+    object.geometry = object.geometry?.clone();
+    const materials = Array.isArray(object.material) ? object.material : [object.material].filter(Boolean);
+    const clonedMaterials = materials.map((material) => {
+      const clone = material.clone();
+      clone.color = color.clone();
+      clone.roughness = 0.72;
+      clone.metalness = 0.02;
+      clone.needsUpdate = true;
+      return clone;
+    });
+    object.material = Array.isArray(object.material) ? clonedMaterials : clonedMaterials[0];
+  });
+}
+
+function applyComposerMannequinPose(model, maquette) {
+  const bones = composerBoneMap(model);
+  const upperBody = composerRotationVector(maquette, "upperBodyRot");
+  const head = composerRotationVector(maquette, "headRot");
+  const leftUpperArm = composerRotationVector(maquette, "leftUpperArm");
+  const leftLowerArm = composerRotationVector(maquette, "leftLowerArm");
+  const rightUpperArm = composerRotationVector(maquette, "rightUpperArm");
+  const rightLowerArm = composerRotationVector(maquette, "rightLowerArm");
+  const leftUpperLeg = composerRotationVector(maquette, "leftUpperLeg");
+  const leftLowerLeg = composerRotationVector(maquette, "leftLowerLeg");
+  const rightUpperLeg = composerRotationVector(maquette, "rightUpperLeg");
+  const rightLowerLeg = composerRotationVector(maquette, "rightLowerLeg");
+  const leftHand = composerRotationVector(maquette, "leftHandRot");
+  const rightHand = composerRotationVector(maquette, "rightHandRot");
+  const addRotation = (name, x = 0, y = 0, z = 0) => {
+    const bone = bones.get(name);
+    if (!bone) return;
+    bone.rotation.x += x;
+    bone.rotation.y += y;
+    bone.rotation.z += z;
+  };
+  const addDistributedRotation = (names, x = 0, y = 0, z = 0) => {
+    const liveBones = names.map((name) => bones.get(name)).filter(Boolean);
+    if (!liveBones.length) return;
+    liveBones.forEach((bone) => {
+      bone.rotation.x += x / liveBones.length;
+      bone.rotation.y += y / liveBones.length;
+      bone.rotation.z += z / liveBones.length;
+    });
+  };
+
+  addDistributedRotation(["spine_01", "spine_02", "spine_03", "spine_04", "spine_05"], upperBody.x, upperBody.y, upperBody.z);
+  addRotation("head", head.x, head.y, head.z);
+
+  addRotation("upperarm_l", leftUpperArm.x, leftUpperArm.y, leftUpperArm.z);
+  addRotation("lowerarm_l", leftLowerArm.x, leftLowerArm.y, leftLowerArm.z);
+  addRotation("upperarm_r", rightUpperArm.x, rightUpperArm.y, rightUpperArm.z);
+  addRotation("lowerarm_r", rightLowerArm.x, rightLowerArm.y, rightLowerArm.z);
+  addRotation("hand_l", leftHand.x, leftHand.y, leftHand.z);
+  addRotation("hand_r", rightHand.x, rightHand.y, rightHand.z);
+
+  addRotation("thigh_l", leftUpperLeg.x, leftUpperLeg.y, leftUpperLeg.z);
+  addRotation("calf_l", leftLowerLeg.x, leftLowerLeg.y, leftLowerLeg.z);
+  addRotation("thigh_r", rightUpperLeg.x, rightUpperLeg.y, rightUpperLeg.z);
+  addRotation("calf_r", rightLowerLeg.x, rightLowerLeg.y, rightLowerLeg.z);
+
+  model.updateMatrixWorld(true);
+}
+
+function composerBoneMap(model) {
+  const bones = new Map();
+  model.traverse((object) => {
+    if (object.isBone && object.name) bones.set(object.name, object);
+  });
+  return bones;
+}
+
+function createComposerProceduralMaquette(maquette) {
   const color = new THREE.Color(maquette.color || "#b8b8b2");
   const dark = color.clone().multiplyScalar(0.58);
   const light = color.clone().lerp(new THREE.Color(0xffffff), 0.16);
@@ -6004,19 +6522,29 @@ function createComposerMaquette(maquette) {
   const highlightMaterial = new THREE.MeshStandardMaterial({ color: light, roughness: 0.7, metalness: 0.02 });
   const group = new THREE.Group();
   group.userData.id = maquette.id;
-  group.position.set(maquette.x, maquette.y, maquette.z);
-  group.rotation.set(THREE.MathUtils.degToRad(maquette.rotX), THREE.MathUtils.degToRad(maquette.rotY), THREE.MathUtils.degToRad(maquette.rotZ));
-  group.scale.setScalar(maquette.scale);
+  applyComposerObjectTransform(group, maquette);
 
   const root = new THREE.Group();
   root.rotation.x = maquette.lean;
   root.position.y = 0.02;
   group.add(root);
 
+  const upperBodyRot = composerRotationVector(maquette, "upperBodyRot");
+  const headRot = composerRotationVector(maquette, "headRot");
+  const leftUpperArm = composerRotationVector(maquette, "leftUpperArm");
+  const leftLowerArm = composerRotationVector(maquette, "leftLowerArm");
+  const rightUpperArm = composerRotationVector(maquette, "rightUpperArm");
+  const rightLowerArm = composerRotationVector(maquette, "rightLowerArm");
+  const leftUpperLeg = composerRotationVector(maquette, "leftUpperLeg");
+  const leftLowerLeg = composerRotationVector(maquette, "leftLowerLeg");
+  const rightUpperLeg = composerRotationVector(maquette, "rightUpperLeg");
+  const rightLowerLeg = composerRotationVector(maquette, "rightLowerLeg");
+  const leftHandRot = composerRotationVector(maquette, "leftHandRot");
+  const rightHandRot = composerRotationVector(maquette, "rightHandRot");
   const waistY = 1.16;
   const upperBody = new THREE.Group();
   upperBody.position.y = waistY;
-  upperBody.rotation.set(maquette.upperBodyRotX, maquette.upperBodyRotY, maquette.upperBodyRotZ);
+  upperBody.rotation.set(upperBodyRot.x, upperBodyRot.y, upperBodyRot.z);
   root.add(upperBody);
 
   addComposerEllipsoid(upperBody, { x: 0, y: 1.8 - waistY, z: 0, sx: 0.52, sy: 0.54, sz: 0.3, material: highlightMaterial });
@@ -6031,7 +6559,7 @@ function createComposerMaquette(maquette) {
 
   const head = new THREE.Group();
   head.position.y = 2.28 - waistY;
-  head.rotation.set(maquette.headRotX, maquette.headRotY, maquette.headRotZ);
+  head.rotation.set(headRot.x, headRot.y, headRot.z);
   upperBody.add(head);
 
   addComposerEllipsoid(head, { x: 0, y: 0.3, z: -0.01, sx: 0.25, sy: 0.35, sz: 0.22, material });
@@ -6043,10 +6571,10 @@ function createComposerMaquette(maquette) {
 
   const shoulderY = 1.98;
   const hipY = 1.08;
-  addComposerArm(upperBody, { side: -1, shoulderY: shoulderY - waistY, upper: maquette.leftUpperArm, lower: maquette.leftLowerArm, handRotation: { x: maquette.leftHandRotX, y: maquette.leftHandRotY, z: maquette.leftHandRotZ }, material, jointMaterial });
-  addComposerArm(upperBody, { side: 1, shoulderY: shoulderY - waistY, upper: maquette.rightUpperArm, lower: maquette.rightLowerArm, handRotation: { x: maquette.rightHandRotX, y: maquette.rightHandRotY, z: maquette.rightHandRotZ }, material, jointMaterial });
-  addComposerLeg(root, { side: -1, hipY, upper: maquette.leftUpperLeg, lower: maquette.leftLowerLeg, material, jointMaterial });
-  addComposerLeg(root, { side: 1, hipY, upper: maquette.rightUpperLeg, lower: maquette.rightLowerLeg, material, jointMaterial });
+  addComposerArm(upperBody, { side: -1, shoulderY: shoulderY - waistY, upper: leftUpperArm.z, lower: leftLowerArm.z, handRotation: leftHandRot, material, jointMaterial });
+  addComposerArm(upperBody, { side: 1, shoulderY: shoulderY - waistY, upper: rightUpperArm.z, lower: rightLowerArm.z, handRotation: rightHandRot, material, jointMaterial });
+  addComposerLeg(root, { side: -1, hipY, upper: leftUpperLeg.z, lower: leftLowerLeg.z, material, jointMaterial });
+  addComposerLeg(root, { side: 1, hipY, upper: rightUpperLeg.z, lower: rightLowerLeg.z, material, jointMaterial });
 
   [
     [-0.24, hipY, 0],
@@ -6387,15 +6915,16 @@ function normalizeCurrentNode(node) {
 
 function normalizeComposerData(data = {}) {
   const composerScene = normalizedComposerScene(data.composerScene);
-  const selectedStillExists = [...composerScene.maquettes, ...composerScene.props, ...composerScene.imagePlanes].some((item) => item.id === data.composerSelectedId);
+  const selectedStillExists = data.composerSelectedId === "camera" || [...composerScene.maquettes, ...composerScene.props, ...composerScene.imagePlanes].some((item) => item.id === data.composerSelectedId);
   return {
     ...data,
     title: data.title || "Composer",
     prompt: data.prompt || "",
     composerAspectRatio: normalizeComposerAspectRatio(data.composerAspectRatio),
     composerShowGuides: data.composerShowGuides !== false,
-    composerSelectedId: selectedStillExists ? data.composerSelectedId : composerScene.maquettes[0]?.id || composerScene.props[0]?.id || composerScene.imagePlanes[0]?.id || "",
+    composerSelectedId: selectedStillExists ? data.composerSelectedId : composerScene.maquettes[0]?.id || composerScene.props[0]?.id || composerScene.imagePlanes[0]?.id || "camera",
     composerSelectedCameraBookmark: data.composerSelectedCameraBookmark || "",
+    composerSavedPoses: normalizeComposerSavedPoses(data.composerSavedPoses),
     composerScene
   };
 }

@@ -1228,6 +1228,8 @@
 .composer-header-actions select,
 .composer-header-actions button,
 .composer-control-row button,
+.composer-control-row > select,
+.composer-control-row.pose-save button,
 .composer-danger {
   min-height: 34px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1238,10 +1240,12 @@
   font-weight: 780;
 }
 
-.composer-header-actions select {
+.composer-header-actions select,
+.composer-control-row > select {
   padding: 0 8px;
   color: #f6f1e8;
   background: rgba(0, 0, 0, 0.34);
+  outline: 0;
 }
 
 .composer-header-actions .composer-toggle.enabled {
@@ -1266,7 +1270,7 @@
   position: relative;
   align-self: center;
   justify-self: center;
-  width: min(100%, calc((100vh - 130px) * 1.777));
+  width: min(100%, calc((100vh - 130px) * var(--composer-aspect, 1.777)));
   max-height: calc(100vh - 130px);
   overflow: hidden;
   border-right: 1px solid rgba(255, 255, 255, 0.07);
@@ -1306,7 +1310,8 @@
 
 .composer-control-row.split,
 .composer-control-row.trio,
-.composer-control-row.bookmark {
+.composer-control-row.bookmark,
+.composer-control-row.pose-save {
   display: grid;
   gap: 8px;
 }
@@ -1323,6 +1328,15 @@
   grid-template-columns: minmax(0, 1fr) 76px;
 }
 
+.composer-control-row.pose-save {
+  grid-template-columns: minmax(0, 1fr) 68px;
+}
+
+.composer-selection-panel {
+  display: grid;
+  gap: 10px;
+}
+
 .composer-field {
   display: grid;
   grid-template-columns: 82px minmax(0, 1fr);
@@ -1334,9 +1348,14 @@
   font-weight: 760;
 }
 
+.composer-field.highlighted > span {
+  color: #ddc631;
+}
+
 .composer-field input,
 .composer-field select,
-.composer-control-row.bookmark select {
+.composer-control-row.bookmark select,
+.composer-control-row.pose-save select {
   width: 100%;
   min-height: 32px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1348,7 +1367,8 @@
 
 .composer-field input:not([type="range"]),
 .composer-field select,
-.composer-control-row.bookmark select {
+.composer-control-row.bookmark select,
+.composer-control-row.pose-save select {
   padding: 0 8px;
 }
 
@@ -1358,12 +1378,24 @@
 }
 
 .composer-field option,
-.composer-header-actions option {
+.composer-header-actions option,
+.composer-control-row option {
   color: #141414;
 }
 
 .composer-field.scrub {
   grid-template-columns: 82px minmax(0, 1fr);
+}
+
+.composer-field.scrub.vector {
+  align-items: center;
+}
+
+.composer-vector-inputs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  min-width: 0;
 }
 
 .composer-scrub-input {
@@ -1412,7 +1444,8 @@
 }
 
 .composer-control-row button:disabled,
-.composer-control-row.bookmark button:disabled {
+.composer-control-row.bookmark button:disabled,
+.composer-control-row.pose-save button:disabled {
   opacity: 0.42;
   cursor: not-allowed;
 }
@@ -1426,14 +1459,6 @@
 .composer-camera-panel {
   display: grid;
   gap: 9px;
-  margin-top: 10px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.composer-camera-panel > strong {
-  color: rgba(244, 240, 232, 0.8);
-  font-size: 12px;
 }
 
 .composer-camera-bookmarks {
@@ -1973,7 +1998,7 @@
   }
 
   .composer-viewport-shell {
-    width: 100%;
+    width: min(100%, calc(52vh * var(--composer-aspect, 1.777)));
     max-height: 52vh;
     border-right: 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.07);

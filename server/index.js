@@ -17,6 +17,7 @@ const rootDir = path.resolve(__dirname, "..");
 const uploadsDir = path.join(rootDir, "uploads");
 const outputsDir = path.join(rootDir, "outputs");
 const savedWorkflowsDir = path.join(rootDir, "saved_workflows");
+const composerPosesDir = path.join(rootDir, "public", "models", "poses");
 const dataDir = path.join(__dirname, "data");
 const historyPath = path.join(dataDir, "history.json");
 const nodeProjectsPath = path.join(dataDir, "node-projects.json");
@@ -53,10 +54,63 @@ const sam3SegmentationModelsEnabled = false; // Flip back to true when revisitin
 const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
 const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
 const voidVideoFrameOptions = [69, 77, 85, 93, 101, 109, 117, 125, 133, 141, 149, 157, 165, 173, 181, 189, 197];
+const composerPoseFieldKeys = [
+  "leftUpperArm",
+  "leftUpperArmX",
+  "leftUpperArmY",
+  "leftUpperArmZ",
+  "leftLowerArm",
+  "leftLowerArmX",
+  "leftLowerArmY",
+  "leftLowerArmZ",
+  "rightUpperArm",
+  "rightUpperArmX",
+  "rightUpperArmY",
+  "rightUpperArmZ",
+  "rightLowerArm",
+  "rightLowerArmX",
+  "rightLowerArmY",
+  "rightLowerArmZ",
+  "leftUpperLeg",
+  "leftUpperLegX",
+  "leftUpperLegY",
+  "leftUpperLegZ",
+  "leftLowerLeg",
+  "leftLowerLegX",
+  "leftLowerLegY",
+  "leftLowerLegZ",
+  "rightUpperLeg",
+  "rightUpperLegX",
+  "rightUpperLegY",
+  "rightUpperLegZ",
+  "rightLowerLeg",
+  "rightLowerLegX",
+  "rightLowerLegY",
+  "rightLowerLegZ",
+  "leftHandRotX",
+  "leftHandRotY",
+  "leftHandRotZ",
+  "rightHandRotX",
+  "rightHandRotY",
+  "rightHandRotZ",
+  "headRotX",
+  "headRotY",
+  "headRotZ",
+  "upperBodyRotX",
+  "upperBodyRotY",
+  "upperBodyRotZ",
+  "lean"
+];
 
 const app = express();
 
-await Promise.all([mkdir(uploadsDir, { recursive: true }), mkdir(outputsDir, { recursive: true }), mkdir(savedWorkflowsDir, { recursive: true }), mkdir(dataDir, { recursive: true })]);
+await Promise.all([
+  mkdir(uploadsDir, { recursive: true }),
+  mkdir(outputsDir, { recursive: true }),
+  mkdir(savedWorkflowsDir, { recursive: true }),
+  mkdir(composerPosesDir, { recursive: true }),
+  mkdir(dataDir, { recursive: true })
+]);
 
 if (process.env.FAL_KEY) {
   fal.config({ credentials: process.env.FAL_KEY });
@@ -91,6 +145,7 @@ app.get("/api/health", (_req, res) => {
       utilityImage: true,
       utilityVideo: true,
       composerFrame: true,
+      composerPoses: true,
       apiJsonErrors: true,
       voidFrameValidation: true,
       sam3VideoMaskOutput: true
@@ -248,6 +303,29 @@ app.delete("/api/saved-workflows/:fileName", async (req, res) => {
   await rm(filePath, { force: true });
   const workflows = await readSavedWorkflows();
   res.json(workflows.map(({ graph, ...workflow }) => workflow));
+});
+
+app.get("/api/composer-poses", async (_req, res) => {
+  res.json({ poses: await readComposerPoses() });
+});
+
+app.post("/api/composer-poses", async (req, res) => {
+  const pose = normalizeComposerPose(req.body.pose || req.body);
+  if (!pose) {
+    return res.status(400).json({ error: "Invalid pose." });
+  }
+
+  const existing = await readComposerPoses();
+  const fileName = pose.fileName && safeComposerPoseFileName(pose.fileName) ? safeComposerPoseFileName(pose.fileName) : uniqueComposerPoseFileName(pose.name, existing);
+  const savedPose = {
+    ...pose,
+    fileName,
+    savedAt: new Date().toISOString()
+  };
+
+  await mkdir(composerPosesDir, { recursive: true });
+  await writeFile(path.join(composerPosesDir, fileName), JSON.stringify(savedPose, null, 2));
+  res.json({ pose: savedPose, poses: await readComposerPoses() });
 });
 
 app.get("/api/node-projects/:id", async (req, res) => {
@@ -2209,6 +2287,65 @@ function uniqueWorkflowFileName(name, workflows) {
   }
 
   return fileName;
+}
+
+function safeComposerPoseFileName(value) {
+  const fileName = path.basename(String(value || ""));
+  if (!fileName.toLowerCase().endsWith(".json")) return "";
+  return fileName.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 120);
+}
+
+function uniqueComposerPoseFileName(name, poses) {
+  const usedNames = new Set(poses.map((pose) => String(pose.fileName || "").toLowerCase()).filter(Boolean));
+  const baseName = safePathSegment(name || "pose") || "pose";
+  let fileName = `${baseName}.json`;
+  let suffix = 2;
+
+  while (usedNames.has(fileName.toLowerCase())) {
+    fileName = `${baseName}-${suffix}.json`;
+    suffix += 1;
+  }
+
+  return fileName;
+}
+
+function normalizeComposerPose(pose, index = 0) {
+  if (!pose || typeof pose !== "object") return null;
+  const fallbackId = `pose-${index + 1}`;
+  const id = String(pose.id || pose.fileName || fallbackId).replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 96) || fallbackId;
+  const name = String(pose.name || `Pose ${index + 1}`).trim() || `Pose ${index + 1}`;
+  const normalized = {
+    id,
+    name,
+    fileName: safeComposerPoseFileName(pose.fileName),
+    pose: String(pose.pose || id)
+  };
+
+  composerPoseFieldKeys.forEach((key) => {
+    normalized[key] = finiteNumber(pose[key], 0);
+  });
+
+  return normalized;
+}
+
+async function readComposerPoses() {
+  await mkdir(composerPosesDir, { recursive: true });
+  const entries = await readdir(composerPosesDir, { withFileTypes: true });
+  const poses = [];
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json")) continue;
+
+    try {
+      const pose = JSON.parse(await readFile(path.join(composerPosesDir, entry.name), "utf8"));
+      const normalized = normalizeComposerPose({ ...pose, fileName: entry.name }, poses.length);
+      if (normalized) poses.push(normalized);
+    } catch (error) {
+      console.warn(`Skipping unreadable Composer pose ${entry.name}:`, error.message);
+    }
+  }
+
+  return poses.sort((first, second) => first.name.localeCompare(second.name));
 }
 
 async function readSavedWorkflows() {
