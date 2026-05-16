@@ -25,6 +25,8 @@ let historyWriteQueue = Promise.resolve();
 const port = Number(process.env.PORT || 3333);
 const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_PER_SECOND || 0.3034);
 const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.2419);
+const happyHorse720pCostPerSecond = Number(process.env.HAPPY_HORSE_720P_COST_PER_SECOND || 0.14);
+const happyHorse1080pCostPerSecond = Number(process.env.HAPPY_HORSE_1080P_COST_PER_SECOND || 0.28);
 const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.15);
 const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.3);
 const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 0.053);
@@ -174,6 +176,11 @@ app.get("/api/stats", async (_req, res) => {
       seedance: {
         standardCostPerSecond: seedanceStandardCostPerSecond,
         fastCostPerSecond: seedanceFastCostPerSecond,
+        currency: "USD"
+      },
+      happyHorse: {
+        costPerSecond720p: happyHorse720pCostPerSecond,
+        costPerSecond1080p: happyHorse1080pCostPerSecond,
         currency: "USD"
       },
       nanoBananaPro: {
@@ -1416,6 +1423,14 @@ app.post("/api/node/generate-video", async (req, res) => {
       });
     }
 
+    if (selectedVideoModel.provider === "fal-happy-horse") {
+      return runHappyHorseReferenceVideo(req, res, {
+        prompt,
+        referenceImageUrls: Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [],
+        selectedVideoModel
+      });
+    }
+
     const speed = selectedVideoModel.speed;
     const speedPrefix = speed === "fast" ? "fast/" : "";
     const startFrameUrl = firstLocalOutput(req.body.startFrameUrls);
@@ -1641,6 +1656,77 @@ async function runAuroraVideo(req, res, { prompt, referenceImageUrls, referenceA
   return res.json({
     requestId: result.requestId,
     endpoint,
+    cost,
+    video: {
+      ...remoteVideo,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
+
+async function runHappyHorseReferenceVideo(req, res, { prompt, referenceImageUrls, selectedVideoModel }) {
+  const imageUrls = referenceImageUrls.slice(0, 9);
+  if (!imageUrls.length) {
+    return res.status(400).json({ error: "Happy Horse requires at least one connected reference image." });
+  }
+
+  const endpoint = selectedVideoModel.id;
+  const resolution = normalizeHappyHorseResolution(req.body.resolution);
+  const duration = normalizeHappyHorseDuration(req.body.duration);
+  const aspectRatio = normalizeHappyHorseAspectRatio(req.body.aspectRatio);
+  const seed = optionalInteger(req.body.seed);
+  const input = {
+    prompt,
+    image_urls: await Promise.all(imageUrls.map(uploadLocalOutputToFal)),
+    aspect_ratio: aspectRatio,
+    resolution,
+    duration,
+    enable_safety_checker: req.body.enableSafetyChecker !== false
+  };
+  if (seed !== undefined) input.seed = Math.min(2147483647, Math.max(0, seed));
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no Happy Horse video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "happy-horse-reference-to-video");
+  const cost = estimateHappyHorseCost({ endpoint, resolution, duration });
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: selectedVideoModel.displayName,
+    endpoint,
+    mode: "Happy Horse reference to video",
+    prompt,
+    submittedPrompt: prompt,
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      resolution,
+      duration,
+      aspectRatio,
+      referenceImageCount: imageUrls.length,
+      enableSafetyChecker: input.enable_safety_checker,
+      seed: result?.data?.seed ?? input.seed ?? null
+    },
+    cost,
+    remoteVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    seed: result?.data?.seed ?? input.seed,
+    endpoint,
+    modelName: selectedVideoModel.displayName,
     cost,
     video: {
       ...remoteVideo,
@@ -2676,6 +2762,25 @@ function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind
   };
 }
 
+function estimateHappyHorseCost({ duration, resolution, endpoint }) {
+  const seconds = Math.max(3, Math.min(15, Number(duration) || 5));
+  const unitRateUsd = resolution === "720p" ? happyHorse720pCostPerSecond : happyHorse1080pCostPerSecond;
+
+  return {
+    amountUsd: roundCurrency(seconds * unitRateUsd),
+    currency: "USD",
+    unitRateUsd,
+    units: seconds,
+    unit: "second",
+    mediaType: "video",
+    resolution,
+    pricingBasis: "Happy Horse fal.ai per-second pricing estimate",
+    pricingSource: "fal-model-page-2026-05-16",
+    endpoint,
+    routeKind: "reference-to-video"
+  };
+}
+
 function estimateWanFunControlCost({ endpoint, matchInputNumFrames, numFrames, matchInputFps, fps }) {
   const billingFrames = matchInputNumFrames ? 81 : numFrames;
   const seconds = billingFrames / 16;
@@ -3376,6 +3481,15 @@ function resolveVideoModel(model) {
     };
   }
 
+  if (normalized.includes("happy") || normalized.includes("horse") || normalized.includes("alibaba")) {
+    return {
+      provider: "fal-happy-horse",
+      displayName: "Happy Horse",
+      id: "alibaba/happy-horse/reference-to-video",
+      speed: "happy-horse"
+    };
+  }
+
   if (normalized.includes("wan")) {
     return {
       provider: "fal-wan-fun-control",
@@ -3622,6 +3736,20 @@ function extensionForMime(mimeType) {
 function normalizeDuration(value) {
   const match = String(value || "15").match(/\d+/);
   return normalizeChoice(match?.[0], ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"], "15");
+}
+
+function normalizeHappyHorseDuration(value) {
+  const match = String(value || "5").match(/\d+/);
+  return clampInteger(match?.[0], 3, 15, 5);
+}
+
+function normalizeHappyHorseResolution(value) {
+  return normalizeChoice(String(value || "1080p"), ["720p", "1080p"], "1080p");
+}
+
+function normalizeHappyHorseAspectRatio(value) {
+  const normalized = String(value || "16:9").match(/\d+:\d+/)?.[0] || "16:9";
+  return normalizeChoice(normalized, ["16:9", "9:16", "1:1", "4:3", "3:4"], "16:9");
 }
 
 function normalizeAspectRatio(value) {

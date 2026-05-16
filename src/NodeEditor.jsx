@@ -59,6 +59,7 @@ const portColors = {
 
 const maxTransferImages = 6;
 const batchOptions = ["1", "2", "3", "4"];
+const happyHorseDurationOptions = Array.from({ length: 13 }, (_value, index) => `${index + 3} seconds`);
 const voidVideoFrameOptions = [69, 77, 85, 93, 101, 109, 117, 125, 133, 141, 149, 157, 165, 173, 181, 189, 197];
 const composerMannequinModelPath = "/models/male_mannequin.glb";
 const composerMannequinModelScale = 1.45;
@@ -382,6 +383,7 @@ const imageRunStaggerMs = 850;
 const videoModelNames = {
   seedance: "Seedance 2.0",
   seedanceFast: "Seedance 2.0 Fast",
+  happyHorse: "Happy Horse",
   wanFunControl: "Wan Fun Control",
   aurora: "Creatify Aurora",
   sam3Video: "SAM 3 Video"
@@ -4676,15 +4678,22 @@ function NodeBody({
   const referenceAudioPort = config.input.find((port) => port.id === "referenceAudioIn");
   const isWanFunControl = isWanFunControlModel(node.data.model);
   const isAurora = isAuroraModel(node.data.model);
+  const isHappyHorse = isHappyHorseModel(node.data.model);
   const isSam3Video = isSam3VideoModel(node.data.model);
+  const happyHorseDuration = normalizedHappyHorseDurationLabel(node.data.duration);
+  const happyHorseResolution = normalizedHappyHorseResolution(node.data.resolution);
+  const happyHorseAspectRatio = normalizedHappyHorseAspectRatio(node.data.aspectRatio);
+  const happyHorseReferenceImageCount = Math.min(incoming.referenceImageIn?.length || 0, 9);
   const settingsOpen = Boolean(node.data.settingsOpen);
   const collapsedPorts = isWanFunControl
     ? [promptPort, referenceVideoPort, referenceImagePort]
     : isAurora
       ? [promptPort, referenceImagePort, referenceAudioPort]
-      : isSam3Video
-        ? [promptPort, referenceVideoPort]
-        : [promptPort, startFramePort, endFramePort, referenceImagePort, referenceVideoPort, referenceAudioPort];
+      : isHappyHorse
+        ? [promptPort, referenceImagePort]
+        : isSam3Video
+          ? [promptPort, referenceVideoPort]
+          : [promptPort, startFramePort, endFramePort, referenceImagePort, referenceVideoPort, referenceAudioPort];
   return (
     <div className="node-body model-node-body video-model-body">
       <ResultPane
@@ -4719,9 +4728,10 @@ function NodeBody({
       <details className="model-settings-drawer" open={settingsOpen} onToggle={(event) => onUpdate(node.id, { settingsOpen: event.currentTarget.open })}>
         <summary>Settings</summary>
         <NodeRow label="Model">
-          <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
+          <select value={node.data.model} onChange={(event) => onUpdate(node.id, videoModelSelectionPatch(node.data, event.target.value))}>
             <option>{videoModelNames.seedance}</option>
             <option>{videoModelNames.seedanceFast}</option>
+            <option>{videoModelNames.happyHorse}</option>
             <option>{videoModelNames.aurora}</option>
             {sam3SegmentationModelsEnabled && <option>{videoModelNames.sam3Video}</option>}
           </select>
@@ -4807,6 +4817,42 @@ function NodeBody({
               </select>
             </NodeRow>
           </>
+        ) : isHappyHorse ? (
+          <>
+            <NodeRow label="Reference Images" inputPort={settingsOpen ? referenceImagePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <button className={incoming.referenceImageIn?.length ? "connected-field" : ""}>{`Add Images ( ${happyHorseReferenceImageCount}/9 )`}</button>
+            </NodeRow>
+            <NodeRow label="Duration">
+              <select value={happyHorseDuration} onChange={(event) => onUpdate(node.id, { duration: event.target.value })}>
+                {happyHorseDurationOptions.map((option) => (
+                  <option key={option}>{option}</option>
+                ))}
+              </select>
+            </NodeRow>
+            <NodeRow label="Resolution">
+              <select value={happyHorseResolution} onChange={(event) => onUpdate(node.id, { resolution: event.target.value })}>
+                <option>1080p</option>
+                <option>720p</option>
+              </select>
+            </NodeRow>
+            <NodeRow label="Aspect Ratio">
+              <select value={happyHorseAspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
+                <option>16:9</option>
+                <option>9:16</option>
+                <option>1:1</option>
+                <option>4:3</option>
+                <option>3:4</option>
+              </select>
+            </NodeRow>
+            <NodeRow label="Seed">
+              <input value={node.data.seed || ""} onChange={(event) => onUpdate(node.id, { seed: event.target.value })} placeholder="Random" />
+            </NodeRow>
+            <NodeRow label="Safety Check">
+              <button className={`node-toggle ${node.data.enableSafetyChecker !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { enableSafetyChecker: node.data.enableSafetyChecker === false })}>
+                <span />
+              </button>
+            </NodeRow>
+          </>
         ) : isSam3Video ? (
           <>
             <NodeRow label="Video" inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -4861,6 +4907,7 @@ function NodeBody({
         )}
       </details>
       {isAurora && <small className="upload-status model-status-note">lipsync model</small>}
+      {isHappyHorse && <small className="upload-status model-status-note">reference image model</small>}
       {isSam3Video && <small className="upload-status model-status-note">segmentation mask model</small>}
     </div>
   );
@@ -5124,6 +5171,41 @@ function isWanFunControlModel(model) {
 function isAuroraModel(model) {
   const normalized = String(model || "").toLowerCase();
   return normalized.includes("aurora") || normalized.includes("creatify");
+}
+
+function isHappyHorseModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("happy") || normalized.includes("horse") || normalized.includes("alibaba");
+}
+
+function videoModelSelectionPatch(data = {}, model) {
+  if (!isHappyHorseModel(model)) {
+    return { model };
+  }
+
+  return {
+    model,
+    duration: isHappyHorseModel(data.model) ? normalizedHappyHorseDurationLabel(data.duration) : "5 seconds",
+    resolution: isHappyHorseModel(data.model) ? normalizedHappyHorseResolution(data.resolution) : "1080p",
+    aspectRatio: isHappyHorseModel(data.model) ? normalizedHappyHorseAspectRatio(data.aspectRatio) : "16:9",
+    enableSafetyChecker: data.enableSafetyChecker !== false,
+    seed: data.seed || ""
+  };
+}
+
+function normalizedHappyHorseDurationLabel(value) {
+  const number = Math.min(15, Math.max(3, Math.round(Number(String(value || "").match(/\d+/)?.[0]) || 5)));
+  return `${number} seconds`;
+}
+
+function normalizedHappyHorseResolution(value) {
+  const normalized = String(value || "1080p");
+  return ["720p", "1080p"].includes(normalized) ? normalized : "1080p";
+}
+
+function normalizedHappyHorseAspectRatio(value) {
+  const normalized = String(value || "16:9").match(/\d+:\d+/)?.[0] || "16:9";
+  return ["16:9", "9:16", "1:1", "4:3", "3:4"].includes(normalized) ? normalized : "16:9";
 }
 
 function isSam3ImageModel(model) {
@@ -5595,6 +5677,8 @@ async function runVideoModelGeneration({ node, prompt, incoming, projectId, proj
       resolution: node.data.resolution,
       aspectRatio: node.data.aspectRatio,
       generateAudio: node.data.generateAudio,
+      seed: node.data.seed || "",
+      enableSafetyChecker: node.data.enableSafetyChecker !== false,
       startFrameUrls: connectedAssetUrls(incoming.startFrameIn),
       endFrameUrls: connectedAssetUrls(incoming.endFrameIn),
       referenceImageUrls: connectedAssetUrls(incoming.referenceImageIn),
