@@ -180,11 +180,20 @@ function defaultComposerMaquette(index = 1) {
     leftLowerLeg: 0,
     rightUpperLeg: 0,
     rightLowerLeg: 0,
-    handRotX: 0,
-    handRotY: 0,
-    handRotZ: 0,
+    leftHandRotX: 0,
+    leftHandRotY: 0,
+    leftHandRotZ: 0,
+    rightHandRotX: 0,
+    rightHandRotY: 0,
+    rightHandRotZ: 0,
+    headRotX: 0,
+    headRotY: 0,
+    headRotZ: 0,
+    upperBodyRotX: 0,
+    upperBodyRotY: 0,
+    upperBodyRotZ: 0,
     lean: 0,
-    color: "#d8c66a"
+    color: "#b8b8b2"
   };
 }
 
@@ -2782,6 +2791,7 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
   const [captureStatus, setCaptureStatus] = React.useState("");
   const sceneData = normalizedComposerScene(node.data.composerScene);
   const imageSources = connectedAssetItems(incoming.imageIn).filter((item) => item.type === "image" || /\.(png|jpe?g|webp|gif)$/i.test(item.url));
+  const renderSceneData = resolveComposerImagePlaneSources(sceneData, imageSources);
   const composerObjects = [...sceneData.maquettes, ...sceneData.props, ...sceneData.imagePlanes];
   const rawSelectedId = node.data.composerSelectedId || "";
   const selectedId = composerObjects.some((item) => item.id === rawSelectedId) ? rawSelectedId : sceneData.maquettes[0]?.id || sceneData.props[0]?.id || sceneData.imagePlanes[0]?.id || "";
@@ -2893,13 +2903,17 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
   }
 
   async function captureFrame() {
-    const imageDataUrl = viewportRef.current?.capture();
-    if (!imageDataUrl) {
+    if (!viewportRef.current?.capture) {
       setCaptureStatus("Viewport not ready.");
       return;
     }
 
     try {
+      const imageDataUrl = await viewportRef.current.capture();
+      if (!imageDataUrl) {
+        setCaptureStatus("Viewport not ready.");
+        return;
+      }
       setCaptureStatus("Capturing...");
       await onCapture(imageDataUrl);
       setCaptureStatus("Captured.");
@@ -2937,7 +2951,7 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
         <main className="composer-main">
           <ComposerViewport
             ref={viewportRef}
-            sceneData={sceneData}
+            sceneData={renderSceneData}
             selectedId={selectedId}
             aspectRatio={node.data.composerAspectRatio || "16:9"}
             showGuides={node.data.composerShowGuides !== false}
@@ -2983,16 +2997,16 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
                 {selectedKind === "maquette" && (
                   <label className="composer-field">
                     <span>Color</span>
-                    <input type="color" value={selectedObject.color || "#d8c66a"} onChange={(event) => patchSelected({ color: event.target.value })} />
+                    <input type="color" value={selectedObject.color || "#b8b8b2"} onChange={(event) => patchSelected({ color: event.target.value })} />
                   </label>
                 )}
-                <ComposerRange label="X" min="-4" max="4" step="0.05" value={selectedObject.x} onChange={(value) => patchSelected({ x: value })} />
-                <ComposerRange label="Y" min="-1" max="4" step="0.05" value={selectedObject.y} onChange={(value) => patchSelected({ y: value })} />
-                <ComposerRange label="Z" min="-4" max="4" step="0.05" value={selectedObject.z} onChange={(value) => patchSelected({ z: value })} />
+                <ComposerRange label="X" step="0.05" value={selectedObject.x} onChange={(value) => patchSelected({ x: value })} />
+                <ComposerRange label="Y" step="0.05" value={selectedObject.y} onChange={(value) => patchSelected({ y: value })} />
+                <ComposerRange label="Z" step="0.05" value={selectedObject.z} onChange={(value) => patchSelected({ z: value })} />
                 <ComposerRange label="Rot X" min="-360" max="360" step="1" value={selectedObject.rotX} onChange={(value) => patchSelected({ rotX: value })} />
                 <ComposerRange label="Rot Y" min="-360" max="360" step="1" value={selectedObject.rotY} onChange={(value) => patchSelected({ rotY: value })} />
                 <ComposerRange label="Rot Z" min="-360" max="360" step="1" value={selectedObject.rotZ} onChange={(value) => patchSelected({ rotZ: value })} />
-                <ComposerRange label="Scale" min="0.45" max="1.8" step="0.05" value={selectedObject.scale} onChange={(value) => patchSelected({ scale: value })} />
+                <ComposerRange label="Scale" step="0.05" value={selectedObject.scale} onChange={(value) => patchSelected({ scale: value })} />
 
                 {selectedKind === "maquette" ? (
                   <>
@@ -3006,18 +3020,27 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
                         <option value="reach">Reach</option>
                       </select>
                     </label>
-                    <ComposerRange label="L Upper Arm" min="-1.5" max="1.5" step="0.05" value={selectedObject.leftUpperArm} onChange={(value) => patchSelected({ leftUpperArm: value })} />
-                    <ComposerRange label="L Lower Arm" min="-1.5" max="1.5" step="0.05" value={selectedObject.leftLowerArm} onChange={(value) => patchSelected({ leftLowerArm: value })} />
-                    <ComposerRange label="R Upper Arm" min="-1.5" max="1.5" step="0.05" value={selectedObject.rightUpperArm} onChange={(value) => patchSelected({ rightUpperArm: value })} />
-                    <ComposerRange label="R Lower Arm" min="-1.5" max="1.5" step="0.05" value={selectedObject.rightLowerArm} onChange={(value) => patchSelected({ rightLowerArm: value })} />
-                    <ComposerRange label="L Upper Leg" min="-1.5" max="1.5" step="0.05" value={selectedObject.leftUpperLeg} onChange={(value) => patchSelected({ leftUpperLeg: value })} />
-                    <ComposerRange label="L Lower Leg" min="-1.5" max="1.5" step="0.05" value={selectedObject.leftLowerLeg} onChange={(value) => patchSelected({ leftLowerLeg: value })} />
-                    <ComposerRange label="R Upper Leg" min="-1.5" max="1.5" step="0.05" value={selectedObject.rightUpperLeg} onChange={(value) => patchSelected({ rightUpperLeg: value })} />
-                    <ComposerRange label="R Lower Leg" min="-1.5" max="1.5" step="0.05" value={selectedObject.rightLowerLeg} onChange={(value) => patchSelected({ rightLowerLeg: value })} />
-                    <ComposerRange label="Hand X" min="-1.4" max="1.4" step="0.05" value={selectedObject.handRotX} onChange={(value) => patchSelected({ handRotX: value })} />
-                    <ComposerRange label="Hand Y" min="-1.4" max="1.4" step="0.05" value={selectedObject.handRotY} onChange={(value) => patchSelected({ handRotY: value })} />
-                    <ComposerRange label="Hand Z" min="-1.4" max="1.4" step="0.05" value={selectedObject.handRotZ} onChange={(value) => patchSelected({ handRotZ: value })} />
-                    <ComposerRange label="Lean" min="-0.65" max="0.65" step="0.05" value={selectedObject.lean} onChange={(value) => patchSelected({ lean: value })} />
+                    <ComposerRotationRange label="L Upper Arm" value={selectedObject.leftUpperArm} onChange={(value) => patchSelected({ leftUpperArm: value })} />
+                    <ComposerRotationRange label="L Lower Arm" value={selectedObject.leftLowerArm} onChange={(value) => patchSelected({ leftLowerArm: value })} />
+                    <ComposerRotationRange label="R Upper Arm" value={selectedObject.rightUpperArm} onChange={(value) => patchSelected({ rightUpperArm: value })} />
+                    <ComposerRotationRange label="R Lower Arm" value={selectedObject.rightLowerArm} onChange={(value) => patchSelected({ rightLowerArm: value })} />
+                    <ComposerRotationRange label="L Upper Leg" value={selectedObject.leftUpperLeg} onChange={(value) => patchSelected({ leftUpperLeg: value })} />
+                    <ComposerRotationRange label="L Lower Leg" value={selectedObject.leftLowerLeg} onChange={(value) => patchSelected({ leftLowerLeg: value })} />
+                    <ComposerRotationRange label="R Upper Leg" value={selectedObject.rightUpperLeg} onChange={(value) => patchSelected({ rightUpperLeg: value })} />
+                    <ComposerRotationRange label="R Lower Leg" value={selectedObject.rightLowerLeg} onChange={(value) => patchSelected({ rightLowerLeg: value })} />
+                    <ComposerRotationRange label="L Hand X" value={selectedObject.leftHandRotX} onChange={(value) => patchSelected({ leftHandRotX: value })} />
+                    <ComposerRotationRange label="L Hand Y" value={selectedObject.leftHandRotY} onChange={(value) => patchSelected({ leftHandRotY: value })} />
+                    <ComposerRotationRange label="L Hand Z" value={selectedObject.leftHandRotZ} onChange={(value) => patchSelected({ leftHandRotZ: value })} />
+                    <ComposerRotationRange label="R Hand X" value={selectedObject.rightHandRotX} onChange={(value) => patchSelected({ rightHandRotX: value })} />
+                    <ComposerRotationRange label="R Hand Y" value={selectedObject.rightHandRotY} onChange={(value) => patchSelected({ rightHandRotY: value })} />
+                    <ComposerRotationRange label="R Hand Z" value={selectedObject.rightHandRotZ} onChange={(value) => patchSelected({ rightHandRotZ: value })} />
+                    <ComposerRotationRange label="Head X" value={selectedObject.headRotX} onChange={(value) => patchSelected({ headRotX: value })} />
+                    <ComposerRotationRange label="Head Y" value={selectedObject.headRotY} onChange={(value) => patchSelected({ headRotY: value })} />
+                    <ComposerRotationRange label="Head Z" value={selectedObject.headRotZ} onChange={(value) => patchSelected({ headRotZ: value })} />
+                    <ComposerRotationRange label="Upper Body X" value={selectedObject.upperBodyRotX} onChange={(value) => patchSelected({ upperBodyRotX: value })} />
+                    <ComposerRotationRange label="Upper Body Y" value={selectedObject.upperBodyRotY} onChange={(value) => patchSelected({ upperBodyRotY: value })} />
+                    <ComposerRotationRange label="Upper Body Z" value={selectedObject.upperBodyRotZ} onChange={(value) => patchSelected({ upperBodyRotZ: value })} />
+                    <ComposerRotationRange label="Lean" value={selectedObject.lean} onChange={(value) => patchSelected({ lean: value })} />
                   </>
                 ) : selectedKind === "prop" ? (
                   <>
@@ -3084,9 +3107,9 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
                   <Trash2 size={15} />
                 </button>
               </div>
-              <ComposerRange label="X" min="-10" max="10" step="0.05" value={sceneData.camera.x} onChange={(value) => patchCamera({ x: value })} />
-              <ComposerRange label="Y" min="0.25" max="8" step="0.05" value={sceneData.camera.y} onChange={(value) => patchCamera({ y: value })} />
-              <ComposerRange label="Z" min="-10" max="10" step="0.05" value={sceneData.camera.z} onChange={(value) => patchCamera({ z: value })} />
+              <ComposerRange label="X" step="0.05" value={sceneData.camera.x} onChange={(value) => patchCamera({ x: value })} />
+              <ComposerRange label="Y" step="0.05" value={sceneData.camera.y} onChange={(value) => patchCamera({ y: value })} />
+              <ComposerRange label="Z" step="0.05" value={sceneData.camera.z} onChange={(value) => patchCamera({ z: value })} />
               <ComposerRange label="Yaw" min="-360" max="360" step="1" value={sceneData.camera.yaw} onChange={(value) => patchCamera({ yaw: value })} />
               <ComposerRange label="Pitch" min="-82" max="82" step="1" value={sceneData.camera.pitch} onChange={(value) => patchCamera({ pitch: value })} />
               <ComposerRange label="Lens" min="18" max="80" step="1" value={sceneData.camera.fov} onChange={(value) => patchCamera({ fov: value })} />
@@ -3102,8 +3125,10 @@ function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture
 
 function ComposerRange({ label, value, min, max, step, onChange }) {
   const numericValue = finiteNumber(value, 0);
-  const minValue = finiteNumber(min, 0);
-  const maxValue = finiteNumber(max, 1);
+  const minNumber = Number(min);
+  const maxNumber = Number(max);
+  const hasMin = min !== undefined && min !== null && min !== "" && Number.isFinite(minNumber);
+  const hasMax = max !== undefined && max !== null && max !== "" && Number.isFinite(maxNumber);
   const stepValue = Math.max(finiteNumber(step, 1), 0.0001);
   const precision = composerStepPrecision(stepValue);
   const axis = composerAxisForLabel(label);
@@ -3120,8 +3145,10 @@ function ComposerRange({ label, value, min, max, step, onChange }) {
   }, [numericValue, precision]);
 
   function normalizedValue(nextValue) {
-    const clamped = clamp(nextValue, minValue, maxValue);
-    const rounded = Math.round(clamped / stepValue) * stepValue;
+    let bounded = nextValue;
+    if (hasMin) bounded = Math.max(minNumber, bounded);
+    if (hasMax) bounded = Math.min(maxNumber, bounded);
+    const rounded = Math.round(bounded / stepValue) * stepValue;
     return Number(rounded.toFixed(Math.min(6, precision + 2)));
   }
 
@@ -3217,6 +3244,20 @@ function ComposerRange({ label, value, min, max, step, onChange }) {
   );
 }
 
+function ComposerRotationRange({ label, value, onChange }) {
+  const degrees = THREE.MathUtils.radToDeg(finiteNumber(value, 0));
+  return (
+    <ComposerRange
+      label={label}
+      min="-360"
+      max="360"
+      step="1"
+      value={degrees}
+      onChange={(nextDegrees) => onChange(THREE.MathUtils.degToRad(nextDegrees))}
+    />
+  );
+}
+
 function composerAxisForLabel(label = "") {
   const axisMatch = String(label).match(/\b([XYZ])$/i);
   return axisMatch ? axisMatch[1].toLowerCase() : "";
@@ -3263,13 +3304,15 @@ const ComposerViewport = React.forwardRef(function ComposerViewport({ sceneData,
         const scene = sceneRef.current;
         const camera = cameraRef.current;
         if (!renderer || !scene || !camera) return "";
-        renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, "", {
+        return renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, "", {
           showGrid: false,
-          showSelection: false
+          showSelection: false,
+          awaitTextures: true
+        }).then(() => {
+          const imageDataUrl = renderer.domElement.toDataURL("image/png");
+          renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, stateRef.current.selectedId);
+          return imageDataUrl;
         });
-        const imageDataUrl = renderer.domElement.toDataURL("image/png");
-        renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, stateRef.current.selectedId);
-        return imageDataUrl;
       }
     }),
     []
@@ -5687,6 +5730,9 @@ function normalizedComposerScene(scene = null) {
       const legacyLowerArm = finiteNumber(item?.lowerArm, finiteNumber(item?.armSwing, 0) * 0.65);
       const legacyUpperLeg = finiteNumber(item?.upperLeg, finiteNumber(item?.legSwing, 0));
       const legacyLowerLeg = finiteNumber(item?.lowerLeg, finiteNumber(item?.legSwing, 0) * -0.45);
+      const legacyHandRotX = finiteNumber(item?.handRotX, 0);
+      const legacyHandRotY = finiteNumber(item?.handRotY, 0);
+      const legacyHandRotZ = finiteNumber(item?.handRotZ, 0);
       return {
         id: String(item?.id || `maquette-${index + 1}`),
         name: String(item?.name || `Maquette ${index + 1}`),
@@ -5706,11 +5752,20 @@ function normalizedComposerScene(scene = null) {
         leftLowerLeg: finiteNumber(item?.leftLowerLeg, legacyLowerLeg),
         rightUpperLeg: finiteNumber(item?.rightUpperLeg, -legacyUpperLeg),
         rightLowerLeg: finiteNumber(item?.rightLowerLeg, -legacyLowerLeg),
-        handRotX: finiteNumber(item?.handRotX, 0),
-        handRotY: finiteNumber(item?.handRotY, 0),
-        handRotZ: finiteNumber(item?.handRotZ, 0),
+        leftHandRotX: finiteNumber(item?.leftHandRotX, legacyHandRotX),
+        leftHandRotY: finiteNumber(item?.leftHandRotY, legacyHandRotY),
+        leftHandRotZ: finiteNumber(item?.leftHandRotZ, -legacyHandRotZ),
+        rightHandRotX: finiteNumber(item?.rightHandRotX, legacyHandRotX),
+        rightHandRotY: finiteNumber(item?.rightHandRotY, legacyHandRotY),
+        rightHandRotZ: finiteNumber(item?.rightHandRotZ, legacyHandRotZ),
+        headRotX: finiteNumber(item?.headRotX, 0),
+        headRotY: finiteNumber(item?.headRotY, 0),
+        headRotZ: finiteNumber(item?.headRotZ, 0),
+        upperBodyRotX: finiteNumber(item?.upperBodyRotX, 0),
+        upperBodyRotY: finiteNumber(item?.upperBodyRotY, 0),
+        upperBodyRotZ: finiteNumber(item?.upperBodyRotZ, 0),
         lean: finiteNumber(item?.lean, 0),
-        color: String(item?.color || "#d8c66a")
+        color: String(item?.color || "#b8b8b2")
       };
     }),
     props: propSource.map((item, index) => ({
@@ -5776,10 +5831,33 @@ function composerPosePreset(pose) {
   };
 }
 
+function resolveComposerImagePlaneSources(sceneData, imageSources = []) {
+  const data = normalizedComposerScene(sceneData);
+  const validSources = imageSources.filter((source) => source?.url);
+  if (!validSources.length) return data;
+
+  return {
+    ...data,
+    imagePlanes: data.imagePlanes.map((plane, index) => {
+      const currentSource = validSources.find((source) => source.url === plane.imageUrl);
+      const fallbackSource = validSources[index] || validSources[0];
+      const source = currentSource || fallbackSource;
+      if (!source?.url || plane.imageUrl === source.url) return plane;
+
+      return {
+        ...plane,
+        imageUrl: source.url,
+        name: plane.name || source.label || `Image Plane ${index + 1}`
+      };
+    })
+  };
+}
+
 function renderComposerViewport(renderer, scene, camera, sceneData, selectedId, options = {}) {
   if (!renderer || !scene || !camera) return;
   const showGrid = options.showGrid !== false;
   const showSelection = options.showSelection !== false;
+  const texturePromises = [];
   const data = normalizedComposerScene(sceneData);
   disposeComposerScene(scene);
   scene.clear();
@@ -5814,7 +5892,7 @@ function renderComposerViewport(renderer, scene, camera, sceneData, selectedId, 
   }
 
   [
-    ...data.imagePlanes.map((plane) => createComposerImagePlane(plane, renderer, scene, camera)),
+    ...data.imagePlanes.map((plane) => createComposerImagePlane(plane, renderer, scene, camera, { texturePromises })),
     ...data.props.map(createComposerProp),
     ...data.maquettes.map(createComposerMaquette)
   ].forEach((object) => {
@@ -5826,6 +5904,11 @@ function renderComposerViewport(renderer, scene, camera, sceneData, selectedId, 
   });
 
   renderer.render(scene, camera);
+  if (options.awaitTextures) {
+    return Promise.allSettled(texturePromises).then(() => {
+      renderer.render(scene, camera);
+    });
+  }
 }
 
 function disposeComposerScene(scene) {
@@ -5855,7 +5938,7 @@ function createComposerProp(prop) {
   return group;
 }
 
-function createComposerImagePlane(plane, renderer, scene, camera) {
+function createComposerImagePlane(plane, renderer, scene, camera, options = {}) {
   const group = new THREE.Group();
   group.userData.id = plane.id;
   group.position.set(plane.x, plane.y, plane.z);
@@ -5872,30 +5955,53 @@ function createComposerImagePlane(plane, renderer, scene, camera) {
   group.add(mesh);
 
   if (plane.imageUrl) {
-    new THREE.TextureLoader().load(
-      plane.imageUrl,
-      (texture) => {
-        texture.colorSpace = THREE.SRGBColorSpace;
-        material.map = texture;
-        material.needsUpdate = true;
-        renderer.render(scene, camera);
-      },
-      undefined,
-      () => {
-        material.color.set(0x5b4d20);
-        renderer.render(scene, camera);
-      }
-    );
+    const texturePromise = new Promise((resolve) => {
+      const loader = new THREE.TextureLoader();
+      loader.setCrossOrigin("anonymous");
+      loader.load(
+        composerTextureUrl(plane.imageUrl),
+        (texture) => {
+          texture.colorSpace = THREE.SRGBColorSpace;
+          texture.needsUpdate = true;
+          material.color.set(0xffffff);
+          material.map = texture;
+          material.needsUpdate = true;
+          renderer.render(scene, camera);
+          resolve(true);
+        },
+        undefined,
+        () => {
+          material.color.set(0x5b4d20);
+          renderer.render(scene, camera);
+          resolve(false);
+        }
+      );
+    });
+    options.texturePromises?.push(texturePromise);
   }
 
   return group;
 }
 
+function composerTextureUrl(url) {
+  if (!url || /^(blob:|data:|https?:)/i.test(url)) return url;
+  if (typeof window === "undefined") return url;
+  if (/^\/(?:uploads|outputs)\//i.test(url)) {
+    const mediaOrigin = ["127.0.0.1", "localhost"].includes(window.location.hostname)
+      ? `${window.location.protocol}//${window.location.hostname}:3333`
+      : window.location.origin;
+    return `${mediaOrigin}${url}`;
+  }
+  return new URL(url, window.location.origin).href;
+}
+
 function createComposerMaquette(maquette) {
-  const color = new THREE.Color(maquette.color || "#d8c66a");
-  const dark = color.clone().multiplyScalar(0.55);
-  const material = new THREE.MeshStandardMaterial({ color, roughness: 0.72 });
-  const jointMaterial = new THREE.MeshStandardMaterial({ color: dark, roughness: 0.75 });
+  const color = new THREE.Color(maquette.color || "#b8b8b2");
+  const dark = color.clone().multiplyScalar(0.58);
+  const light = color.clone().lerp(new THREE.Color(0xffffff), 0.16);
+  const material = new THREE.MeshStandardMaterial({ color, roughness: 0.68, metalness: 0.02 });
+  const jointMaterial = new THREE.MeshStandardMaterial({ color: dark, roughness: 0.75, metalness: 0.02 });
+  const highlightMaterial = new THREE.MeshStandardMaterial({ color: light, roughness: 0.7, metalness: 0.02 });
   const group = new THREE.Group();
   group.userData.id = maquette.id;
   group.position.set(maquette.x, maquette.y, maquette.z);
@@ -5904,109 +6010,132 @@ function createComposerMaquette(maquette) {
 
   const root = new THREE.Group();
   root.rotation.x = maquette.lean;
-  root.position.y = 0.05;
+  root.position.y = 0.02;
   group.add(root);
 
-  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 0.95, 18), material);
-  torso.position.y = 1.35;
-  root.add(torso);
+  const waistY = 1.16;
+  const upperBody = new THREE.Group();
+  upperBody.position.y = waistY;
+  upperBody.rotation.set(maquette.upperBodyRotX, maquette.upperBodyRotY, maquette.upperBodyRotZ);
+  root.add(upperBody);
 
-  const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.64, 0.28, 0.34), material);
-  pelvis.position.y = 0.83;
-  root.add(pelvis);
+  addComposerEllipsoid(upperBody, { x: 0, y: 1.8 - waistY, z: 0, sx: 0.52, sy: 0.54, sz: 0.3, material: highlightMaterial });
+  addComposerEllipsoid(upperBody, { x: 0, y: 1.46 - waistY, z: 0.01, sx: 0.34, sy: 0.3, sz: 0.24, material });
+  addComposerEllipsoid(root, { x: 0, y: waistY, z: 0, sx: 0.46, sy: 0.22, sz: 0.28, material });
+  addComposerEllipsoid(root, { x: -0.18, y: 1.18, z: -0.02, sx: 0.22, sy: 0.18, sz: 0.23, material });
+  addComposerEllipsoid(root, { x: 0.18, y: 1.18, z: -0.02, sx: 0.22, sy: 0.18, sz: 0.23, material });
 
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 24, 16), material);
-  head.scale.set(0.86, 1.08, 0.92);
-  head.position.y = 2.1;
-  root.add(head);
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.13, 0.24, 18), jointMaterial);
+  neck.position.y = 2.22 - waistY;
+  upperBody.add(neck);
 
-  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.075, 0.22, 14), jointMaterial);
-  nose.position.set(0, 2.1, -0.27);
+  const head = new THREE.Group();
+  head.position.y = 2.28 - waistY;
+  head.rotation.set(maquette.headRotX, maquette.headRotY, maquette.headRotZ);
+  upperBody.add(head);
+
+  addComposerEllipsoid(head, { x: 0, y: 0.3, z: -0.01, sx: 0.25, sy: 0.35, sz: 0.22, material });
+  addComposerEllipsoid(head, { x: 0, y: 0.3, z: -0.18, sx: 0.17, sy: 0.24, sz: 0.035, material: highlightMaterial });
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.13, 14), jointMaterial);
+  nose.position.set(0, 0.29, -0.27);
   nose.rotation.x = -Math.PI / 2;
-  root.add(nose);
+  head.add(nose);
 
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.13, 0.24, 14), jointMaterial);
-  neck.position.y = 1.82;
-  root.add(neck);
-
-  const shoulderY = 1.7;
-  const hipY = 0.74;
-  addComposerArm(root, { side: -1, shoulderY, upper: maquette.leftUpperArm, lower: maquette.leftLowerArm, hand: maquette, material, jointMaterial });
-  addComposerArm(root, { side: 1, shoulderY, upper: maquette.rightUpperArm, lower: maquette.rightLowerArm, hand: maquette, material, jointMaterial });
-  addComposerLeg(root, { side: -1, hipY, upper: maquette.leftUpperLeg, lower: maquette.leftLowerLeg, material });
-  addComposerLeg(root, { side: 1, hipY, upper: maquette.rightUpperLeg, lower: maquette.rightLowerLeg, material });
+  const shoulderY = 1.98;
+  const hipY = 1.08;
+  addComposerArm(upperBody, { side: -1, shoulderY: shoulderY - waistY, upper: maquette.leftUpperArm, lower: maquette.leftLowerArm, handRotation: { x: maquette.leftHandRotX, y: maquette.leftHandRotY, z: maquette.leftHandRotZ }, material, jointMaterial });
+  addComposerArm(upperBody, { side: 1, shoulderY: shoulderY - waistY, upper: maquette.rightUpperArm, lower: maquette.rightLowerArm, handRotation: { x: maquette.rightHandRotX, y: maquette.rightHandRotY, z: maquette.rightHandRotZ }, material, jointMaterial });
+  addComposerLeg(root, { side: -1, hipY, upper: maquette.leftUpperLeg, lower: maquette.leftLowerLeg, material, jointMaterial });
+  addComposerLeg(root, { side: 1, hipY, upper: maquette.rightUpperLeg, lower: maquette.rightLowerLeg, material, jointMaterial });
 
   [
-    [-0.43, shoulderY, 0],
-    [0.43, shoulderY, 0],
-    [-0.22, hipY, 0],
-    [0.22, hipY, 0]
-  ].forEach(([x, y, z]) => {
-    const joint = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), jointMaterial);
-    joint.position.set(x, y, z);
-    root.add(joint);
-  });
+    [-0.24, hipY, 0],
+    [0.24, hipY, 0]
+  ].forEach(([x, y, z]) => addComposerEllipsoid(root, { x, y, z, sx: 0.12, sy: 0.12, sz: 0.12, material: jointMaterial }));
+  [
+    [-0.55, shoulderY - waistY, 0],
+    [0.55, shoulderY - waistY, 0]
+  ].forEach(([x, y, z]) => addComposerEllipsoid(upperBody, { x, y, z, sx: 0.12, sy: 0.12, sz: 0.12, material: jointMaterial }));
 
   return group;
 }
 
-function addComposerArm(root, { side, shoulderY, upper, lower, hand, material, jointMaterial }) {
+function addComposerArm(root, { side, shoulderY, upper, lower, handRotation, material, jointMaterial }) {
   const shoulder = new THREE.Group();
-  shoulder.position.set(side * 0.43, shoulderY, 0);
+  shoulder.position.set(side * 0.55, shoulderY, 0);
   shoulder.rotation.x = upper;
-  shoulder.rotation.z = side * 0.24;
+  shoulder.rotation.z = side * 0.18;
   root.add(shoulder);
 
-  const upperArm = addLimb(shoulder, { x: 0, y: 0, z: 0, length: 0.58, radius: 0.07, rotX: 0, rotZ: 0, material });
-  upperArm.position.y = -0.29;
+  addComposerEllipsoid(shoulder, { x: 0, y: 0, z: 0, sx: 0.15, sy: 0.16, sz: 0.14, material });
+  addLimb(shoulder, { length: 0.68, radiusTop: 0.105, radiusBottom: 0.085, material });
 
   const elbow = new THREE.Group();
-  elbow.position.y = -0.58;
+  elbow.position.y = -0.68;
   elbow.rotation.x = lower;
   shoulder.add(elbow);
-
-  const forearm = addLimb(elbow, { x: 0, y: 0, z: 0, length: 0.54, radius: 0.058, rotX: 0, rotZ: 0, material });
-  forearm.position.y = -0.27;
+  addComposerEllipsoid(elbow, { x: 0, y: 0, z: 0, sx: 0.095, sy: 0.095, sz: 0.095, material: jointMaterial });
+  addLimb(elbow, { length: 0.62, radiusTop: 0.085, radiusBottom: 0.058, material });
 
   const wrist = new THREE.Group();
-  wrist.position.y = -0.54;
-  wrist.rotation.set(hand.handRotX, hand.handRotY, side * hand.handRotZ);
+  wrist.position.y = -0.62;
+  wrist.rotation.set(handRotation.x, handRotation.y, handRotation.z);
   elbow.add(wrist);
-
-  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.12, 0.055), material);
-  wrist.add(palm);
-  const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.11, 0.04), jointMaterial);
-  thumb.position.set(side * 0.08, 0.005, -0.015);
-  thumb.rotation.z = side * 0.7;
-  wrist.add(thumb);
+  addComposerEllipsoid(wrist, { x: 0, y: 0, z: 0, sx: 0.065, sy: 0.06, sz: 0.06, material: jointMaterial });
+  addComposerEllipsoid(wrist, { x: 0, y: -0.11, z: -0.01, sx: 0.075, sy: 0.13, sz: 0.04, material });
+  addComposerFinger(wrist, { x: -0.036, y: -0.23, z: -0.012, length: 0.12, radius: 0.014, material });
+  addComposerFinger(wrist, { x: 0, y: -0.24, z: -0.012, length: 0.13, radius: 0.015, material });
+  addComposerFinger(wrist, { x: 0.036, y: -0.23, z: -0.012, length: 0.12, radius: 0.014, material });
+  const thumb = addComposerFinger(wrist, { x: side * 0.075, y: -0.1, z: -0.025, length: 0.1, radius: 0.016, material: jointMaterial });
+  thumb.rotation.z = side * 0.68;
 }
 
-function addComposerLeg(root, { side, hipY, upper, lower, material }) {
+function addComposerLeg(root, { side, hipY, upper, lower, material, jointMaterial }) {
   const hip = new THREE.Group();
-  hip.position.set(side * 0.22, hipY, 0);
+  hip.position.set(side * 0.24, hipY, 0);
   hip.rotation.x = upper;
-  hip.rotation.z = side * 0.07;
+  hip.rotation.z = side * 0.05;
   root.add(hip);
 
-  const upperLeg = addLimb(hip, { x: 0, y: 0, z: 0, length: 0.66, radius: 0.085, rotX: 0, rotZ: 0, material });
-  upperLeg.position.y = -0.33;
+  addComposerEllipsoid(hip, { x: 0, y: 0, z: 0, sx: 0.135, sy: 0.12, sz: 0.12, material: jointMaterial });
+  addLimb(hip, { length: 0.78, radiusTop: 0.13, radiusBottom: 0.1, material });
 
   const knee = new THREE.Group();
-  knee.position.y = -0.66;
+  knee.position.y = -0.78;
   knee.rotation.x = lower;
   hip.add(knee);
+  addComposerEllipsoid(knee, { x: 0, y: 0, z: -0.015, sx: 0.105, sy: 0.085, sz: 0.095, material: jointMaterial });
+  addLimb(knee, { length: 0.72, radiusTop: 0.095, radiusBottom: 0.065, material });
 
-  const lowerLeg = addLimb(knee, { x: 0, y: 0, z: 0, length: 0.62, radius: 0.075, rotX: 0, rotZ: 0, material });
-  lowerLeg.position.y = -0.31;
+  const ankle = new THREE.Group();
+  ankle.position.y = -0.72;
+  knee.add(ankle);
+  addComposerEllipsoid(ankle, { x: 0, y: 0, z: 0, sx: 0.07, sy: 0.055, sz: 0.06, material: jointMaterial });
+  const foot = addComposerEllipsoid(ankle, { x: 0, y: -0.075, z: -0.13, sx: 0.12, sy: 0.06, sz: 0.25, material });
+  foot.rotation.x = -0.08;
+  addComposerEllipsoid(ankle, { x: 0, y: -0.08, z: -0.31, sx: 0.11, sy: 0.045, sz: 0.095, material });
 }
 
-function addLimb(root, { x, y, z, length, radius, rotX, rotZ, material }) {
-  const limb = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius * 0.92, length, 14), material);
-  limb.position.set(x, y - length / 2, z);
-  limb.rotation.x = rotX;
-  limb.rotation.z = rotZ;
+function addLimb(root, { length, radiusTop, radiusBottom, material }) {
+  const limb = new THREE.Mesh(new THREE.CylinderGeometry(radiusTop, radiusBottom, length, 18), material);
+  limb.position.y = -length / 2;
   root.add(limb);
   return limb;
+}
+
+function addComposerEllipsoid(root, { x, y, z, sx, sy, sz, material }) {
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 28, 16), material);
+  mesh.position.set(x, y, z);
+  mesh.scale.set(sx, sy, sz);
+  root.add(mesh);
+  return mesh;
+}
+
+function addComposerFinger(root, { x, y, z, length, radius, material }) {
+  const finger = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius * 0.88, length, 10), material);
+  finger.position.set(x, y, z);
+  root.add(finger);
+  return finger;
 }
 
 function finiteNumber(value, fallback) {
