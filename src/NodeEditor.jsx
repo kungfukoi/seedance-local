@@ -1,6 +1,7 @@
 import React from "react";
 import * as THREE from "three";
 import {
+  Box,
   Camera,
   ChevronDown,
   ChevronLeft,
@@ -32,6 +33,7 @@ const nodeCatalog = [
   { type: "text", label: "Text", icon: Type },
   { type: "image", label: "Image", icon: FileImage },
   { type: "camera", label: "Camera", icon: Camera },
+  { type: "composer", label: "Composer", icon: Box },
   { type: "style", label: "Style", icon: Palette },
   { type: "transfer", label: "Transfer", icon: Compass },
   { type: "utility", label: "Utility", icon: Wrench },
@@ -55,6 +57,9 @@ const portColors = {
 
 const maxTransferImages = 6;
 const batchOptions = ["1", "2", "3", "4"];
+const voidVideoFrameOptions = [69, 77, 85, 93, 101, 109, 117, 125, 133, 141, 149, 157, 165, 173, 181, 189, 197];
+const composerReferencePrompt =
+  "Use the connected Composer frame as a strict composition and blocking control image. Preserve its camera angle, framing, horizon/floor plane, subject silhouette, pose direction, major object positions, scale relationships, and negative space. Translate the simple maquette and proxy objects into the requested final subject matter, but do not copy viewport guide lines, grid lines, flat blue material, or simple primitive geometry as final image details.";
 const transferPromptSuffix =
   "Only use the uploaded collage reference image labeled TRANSFER.png as a transfer reference for color grading, grain style, texture, lighting, and camera qualities. The generated image should NOT take content, layout, subjects, or composition from TRANSFER.png directly; only use it as a visual transfer guide.";
 const stylePresetPrompts = {
@@ -121,6 +126,103 @@ const qwenCameraDefaults = {
   guidanceScale: 4.5,
   numInferenceSteps: 28
 };
+const composerPosePresets = {
+  standing: { pose: "standing", upperArm: 0, lowerArm: 0, upperLeg: 0, lowerLeg: 0, lean: 0 },
+  walk: { pose: "walk", upperArm: 0.55, lowerArm: 0.24, upperLeg: -0.55, lowerLeg: 0.28, lean: 0.08 },
+  run: { pose: "run", upperArm: 1, lowerArm: 0.55, upperLeg: -0.95, lowerLeg: 0.62, lean: 0.22 },
+  lean: { pose: "lean", upperArm: 0.15, lowerArm: 0.1, upperLeg: 0.05, lowerLeg: 0.08, lean: 0.45 },
+  reach: { pose: "reach", upperArm: -0.95, lowerArm: -0.2, upperLeg: 0.15, lowerLeg: 0.1, lean: 0.12 }
+};
+const composerAspectRatios = {
+  "21:9": "21 / 9",
+  "16:9": "16 / 9",
+  "4:3": "4 / 3",
+  "1:1": "1 / 1",
+  "9:16": "9 / 16"
+};
+
+function defaultComposerScene() {
+  return {
+    camera: {
+      x: 3.4,
+      y: 2.75,
+      z: 4.15,
+      yaw: 36,
+      pitch: -16,
+      distance: 6.2,
+      fov: 38,
+      targetY: 1.1
+    },
+    maquettes: [defaultComposerMaquette(1)],
+    props: [defaultComposerProp(1)],
+    imagePlanes: [],
+    cameraBookmarks: []
+  };
+}
+
+function defaultComposerMaquette(index = 1) {
+  return {
+    id: `maquette-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
+    name: `Maquette ${index}`,
+    x: index === 1 ? 0 : (index - 1) * 0.8,
+    y: 0,
+    z: 0,
+    rotX: 0,
+    rotY: 0,
+    rotZ: 0,
+    scale: 1,
+    pose: "standing",
+    leftUpperArm: 0,
+    leftLowerArm: 0,
+    rightUpperArm: 0,
+    rightLowerArm: 0,
+    leftUpperLeg: 0,
+    leftLowerLeg: 0,
+    rightUpperLeg: 0,
+    rightLowerLeg: 0,
+    handRotX: 0,
+    handRotY: 0,
+    handRotZ: 0,
+    lean: 0,
+    color: "#d8c66a"
+  };
+}
+
+function defaultComposerProp(index = 1) {
+  return {
+    id: `prop-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
+    name: `Box ${index}`,
+    x: index === 1 ? 1.6 : index * 0.6,
+    y: 0,
+    z: -0.45,
+    rotX: 0,
+    rotY: 0,
+    rotZ: 0,
+    scale: 1,
+    width: 0.9,
+    height: 0.9,
+    depth: 0.9,
+    color: "#496b8f"
+  };
+}
+
+function defaultComposerImagePlane(index = 1, imageUrl = "", label = "") {
+  return {
+    id: `image-plane-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
+    name: label || `Image Plane ${index}`,
+    imageUrl,
+    x: 0,
+    y: 1.15,
+    z: -1.4,
+    rotX: 0,
+    rotY: 0,
+    rotZ: 0,
+    scale: 1,
+    width: 2,
+    height: 1.125,
+    opacity: 1
+  };
+}
 
 const initialNodes = [
   {
@@ -224,7 +326,7 @@ const utilityModelDescriptions = {
   [utilityImageModelNames.sam3Image]: "Segments prompted objects in an image and returns the masked result.",
   [utilityImageModelNames.birefnetImage]: "Removes an image background with BiRefNet and can optionally return the mask.",
   [utilityVideoModelNames.wanFunControl]: "Uses a control video, optional reference image, and prompt to guide a new video.",
-  [utilityVideoModelNames.sam3Video]: "Segments prompted objects through a video and returns the masked result.",
+  [utilityVideoModelNames.sam3Video]: "Segments prompted objects through a video and returns a mask video.",
   [utilityVideoModelNames.voidVideoInpainting]: "Removes an object from a video and inpaints the affected background over time.",
   [utilityVideoModelNames.birefnetVideo]: "Removes a video background with BiRefNet and can optionally return the mask video.",
   [utilityVideoModelNames.rifeVideo]: "Interpolates in-between frames with RIFE optical-flow style motion estimation to smooth low-FPS video."
@@ -259,6 +361,7 @@ export default function NodeEditor({ active = true } = {}) {
   const [saveStatus, setSaveStatus] = React.useState("");
   const [compilingTransferNodeId, setCompilingTransferNodeId] = React.useState(null);
   const [selectedEdgeId, setSelectedEdgeId] = React.useState(null);
+  const [composerEditorNodeId, setComposerEditorNodeId] = React.useState(null);
 
   const incomingByNode = React.useMemo(() => buildIncomingByNode(nodes, edges), [nodes, edges]);
   const connectedPortKeys = React.useMemo(() => buildConnectedPortKeys(edges), [edges]);
@@ -270,6 +373,7 @@ export default function NodeEditor({ active = true } = {}) {
     [nodes, selectedNodeSet]
   );
   const selectedProjectName = projects.find((project) => project.id === projectId)?.name;
+  const composerEditorNode = nodes.find((node) => node.id === composerEditorNodeId && node.type === "composer");
 
   React.useEffect(() => {
     nodesRef.current = nodes;
@@ -676,6 +780,7 @@ export default function NodeEditor({ active = true } = {}) {
   function updateNode(nodeId, patch) {
     let nextUtilityData = null;
     setNodes((current) => {
+      const shouldUpdateConnectedPreviews = Array.isArray(patch.resultItems) && patch.resultItems.some((item) => item?.url);
       const nextNodes = current.map((node) =>
         node.id === nodeId
           ? (() => {
@@ -691,8 +796,9 @@ export default function NodeEditor({ active = true } = {}) {
             })()
           : node
       );
-      nodesRef.current = nextNodes;
-      return nextNodes;
+      const updatedNodes = shouldUpdateConnectedPreviews ? syncConnectedPreviewNodes(nextNodes, nodeId, edgesRef.current) : nextNodes;
+      nodesRef.current = updatedNodes;
+      return updatedNodes;
     });
 
     if (nextUtilityData && ("utilityMode" in patch || "utilityImageModel" in patch || "utilityVideoModel" in patch)) {
@@ -744,6 +850,86 @@ export default function NodeEditor({ active = true } = {}) {
         status: "error",
         error: error.message
       });
+    }
+  }
+
+  function syncConnectedPreviewNodes(nextNodes, sourceNodeId, currentEdges) {
+    const hasPreviewConnection = currentEdges.some((edge) => edge.from.nodeId === sourceNodeId && edge.to.port === "sourceIn");
+    if (!hasPreviewConnection) return nextNodes;
+
+    const incomingByPreview = buildIncomingByNode(nextNodes, currentEdges);
+    return nextNodes.map((node) => {
+      if (node.type !== "preview") return node;
+      const incomingSources = incomingByPreview[node.id]?.sourceIn || [];
+      if (!incomingSources.some(({ edge }) => edge.from.nodeId === sourceNodeId)) return node;
+
+      const previewItems = connectedPreviewSources(incomingSources);
+      let latestIndex = -1;
+      previewItems.forEach((item, index) => {
+        if (item.sourceNodeId === sourceNodeId) latestIndex = index;
+      });
+      if (latestIndex < 0) return node;
+
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          previewSelectedIndex: latestIndex
+        }
+      };
+    });
+  }
+
+  async function captureComposerFrame(node, imageDataUrl) {
+    pushUndoSnapshot();
+    updateNode(node.id, {
+      status: "uploading",
+      error: ""
+    });
+
+    try {
+      const composerScene = normalizedComposerScene(node.data.composerScene);
+      const { response, data } = await fetchJsonApi("/api/node/composer-frame", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageDataUrl,
+          projectId,
+          projectName,
+          nodeId: node.id,
+          nodeTitle: node.data.title,
+          aspectRatio: node.data.composerAspectRatio || "16:9",
+          maquetteCount: composerScene.maquettes.length,
+          propCount: composerScene.props.length,
+          imagePlaneCount: composerScene.imagePlanes.length
+        })
+      }, "Composer capture");
+      if (!response.ok) throw new Error(data.error || "Composer capture failed.");
+
+      updateNode(node.id, {
+        fileName: data.image.fileName,
+        mimeType: data.image.mimeType,
+        mediaType: "image",
+        resultUrl: data.image.localUrl,
+        resultItems: [
+          {
+            url: data.image.localUrl,
+            type: "image",
+            label: "Composer frame",
+            cost: data.cost
+          }
+        ],
+        selectedResultIndex: 0,
+        status: "complete",
+        error: ""
+      });
+      setSaveStatus("Composer frame captured");
+    } catch (error) {
+      updateNode(node.id, {
+        status: "error",
+        error: error.message
+      });
+      throw error;
     }
   }
 
@@ -1251,6 +1437,7 @@ export default function NodeEditor({ active = true } = {}) {
         if (target.type === "preview" && to.port === "sourceIn") return "";
         if (target.type === "text" && to.port === "imageIn") return "";
         if (target.type === "camera" && to.port === "imageIn") return "";
+        if (target.type === "composer" && to.port === "imageIn") return "";
         if (target.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(to.port)) return "";
         if (target.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(to.port)) return "";
         if (target.type === "utility" && ["imageIn", "referenceImageIn"].includes(to.port)) return "";
@@ -1277,6 +1464,7 @@ export default function NodeEditor({ active = true } = {}) {
       if (!source.data.activated || !source.data.resultUrl) return "Lock Transfer to enable TRANSFER.png output";
       if (
         (target.type === "imageModel" && to.port === "transferIn") ||
+        (target.type === "composer" && to.port === "imageIn") ||
         (target.type === "utility" && ["imageIn", "referenceImageIn"].includes(to.port)) ||
         (target.type === "preview" && to.port === "sourceIn")
       )
@@ -1296,6 +1484,7 @@ export default function NodeEditor({ active = true } = {}) {
       if (target.type === "preview" && to.port === "sourceIn") return "";
       if (target.type === "text" && to.port === "imageIn") return "";
       if (target.type === "camera" && to.port === "imageIn") return "";
+      if (target.type === "composer" && to.port === "imageIn") return "";
       if (target.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(to.port)) return "";
       if (target.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(to.port)) return "";
       if (target.type === "utility" && ["imageIn", "referenceImageIn"].includes(to.port)) return "";
@@ -1319,8 +1508,47 @@ export default function NodeEditor({ active = true } = {}) {
       }
     }
 
+    if (target?.type === "composer") {
+      if (to.port === "promptIn") {
+        if (source.type === "composer") return from.port === "promptOut" ? "" : "Composer prompt input accepts prompt outputs";
+        if (["text", "imageModel", "videoModel", "utility"].includes(source.type)) return "";
+        return "Composer prompt input accepts prompt outputs";
+      }
+
+      if (to.port === "imageIn") {
+        if (source.type === "composer") return from.port === "imageOut" ? "" : "Composer image input accepts image outputs";
+        if (["image", "imageModel", "transfer"].includes(source.type)) return "";
+        return "Composer image input accepts image outputs";
+      }
+    }
+
+    if (source?.type === "composer") {
+      if (from.port === "promptOut") {
+        if (
+          (target.type === "imageModel" && to.port === "promptIn") ||
+          (target.type === "videoModel" && to.port === "promptIn") ||
+          (target.type === "utility" && to.port === "promptIn") ||
+          (target.type === "text" && to.port === "textIn") ||
+          (target.type === "composer" && to.port === "promptIn")
+        )
+          return "";
+        return "Composer prompt output connects to prompt inputs";
+      }
+
+      if (from.port === "imageOut") {
+        if (target.type === "preview" && to.port === "sourceIn") return "";
+        if (target.type === "text" && to.port === "imageIn") return "";
+        if (target.type === "camera" && to.port === "imageIn") return "";
+        if (target.type === "composer" && to.port === "imageIn") return "";
+        if (target.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(to.port)) return "";
+        if (target.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(to.port)) return "";
+        if (target.type === "utility" && ["imageIn", "referenceImageIn"].includes(to.port)) return "";
+        return "Composer frame output connects to image inputs";
+      }
+    }
+
     if (target?.type === "preview") {
-      if (["image", "video", "imageModel", "videoModel", "utility", "transfer"].includes(source?.type)) return "";
+      if (["image", "video", "imageModel", "videoModel", "utility", "transfer", "composer"].includes(source?.type)) return "";
       return "Preview accepts image and video sources";
     }
 
@@ -1586,7 +1814,7 @@ export default function NodeEditor({ active = true } = {}) {
 
     const currentIncomingByNode = buildIncomingByNode(nodesRef.current, edgesRef.current);
     const incoming = currentIncomingByNode[currentNode.id] || {};
-    const basePrompt = connectedText(incoming.promptIn) || currentNode.data.prompt;
+    const basePrompt = connectedText(incoming.promptIn, currentIncomingByNode) || currentNode.data.prompt;
     const isSingleRunSegmentation =
       (currentNode.type === "imageModel" && isSam3ImageModel(currentNode.data.model)) ||
       (currentNode.type === "videoModel" && isSam3VideoModel(currentNode.data.model)) ||
@@ -1594,21 +1822,26 @@ export default function NodeEditor({ active = true } = {}) {
         utilityMode(currentNode) === "video" &&
         (isUtilitySam3VideoModel(currentNode.data.utilityVideoModel) || isUtilityBirefnetVideoModel(currentNode.data.utilityVideoModel)));
     const batchCount = isSingleRunSegmentation ? 1 : nodeBatchCount(currentNode);
+    const previousImageResults = existingResultItemsForNode(currentNode, "image");
+    const previousVideoResults = existingResultItemsForNode(currentNode, "video");
+    const previousUtilityResults = existingResultItemsForNode(currentNode, utilityMode(currentNode) === "video" ? "video" : "image");
 
     try {
       const runningPatch =
         currentNode.type === "text"
           ? { status: "running", error: "" }
-          : { status: "running", error: "", resultUrl: "", resultItems: [], selectedResultIndex: 0 };
+          : { status: "running", error: "" };
       updateNode(currentNode.id, runningPatch);
 
       if (currentNode.type === "camera") {
         const generated = await runCameraQwenEdit({ node: currentNode, incoming, projectId, projectName });
+        const resultItems = appendResultItems(previousImageResults, [generated], "image");
+        const firstNewIndex = Math.max(0, resultItems.length - 1);
         updateNode(currentNode.id, {
           status: "complete",
           resultUrl: generated.url,
-          resultItems: [generated],
-          selectedResultIndex: 0,
+          resultItems,
+          selectedResultIndex: firstNewIndex,
           resultText: generated.prompt || "",
           seed: generated.seed,
           error: ""
@@ -1638,11 +1871,13 @@ export default function NodeEditor({ active = true } = {}) {
           });
           if (!generatedItems.length) throw new Error("Utility image returned no image.");
           const generated = generatedItems[0];
+          const resultItems = appendResultItems(previousUtilityResults, generatedItems, "image");
+          const firstNewIndex = Math.max(0, resultItems.length - generatedItems.length);
           updateNode(currentNode.id, {
             status: "complete",
             resultUrl: generated.url,
-            resultItems: generatedItems,
-            selectedResultIndex: 0,
+            resultItems,
+            selectedResultIndex: firstNewIndex,
             resultText: generatedItems.map((item) => item.text).filter(Boolean).join("\n\n"),
             resultType: "image",
             error: ""
@@ -1666,12 +1901,14 @@ export default function NodeEditor({ active = true } = {}) {
           .flatMap((item) => (Array.isArray(item.value) ? item.value : [item.value]));
         const failures = settled.filter((item) => item.status === "rejected");
         if (!successes.length) throw new Error(failures[0]?.reason?.message || "Utility video failed.");
+        const resultItems = appendResultItems(previousUtilityResults, successes, "video");
+        const firstNewIndex = Math.max(0, resultItems.length - successes.length);
 
         updateNode(currentNode.id, {
           status: "complete",
           resultUrl: successes[0].url,
-          resultItems: successes,
-          selectedResultIndex: 0,
+          resultItems,
+          selectedResultIndex: firstNewIndex,
           resultText: "",
           resultType: "video",
           error: failures.length ? nodeBatchStatusMessage("video", batchCount, successes.length, failures) : ""
@@ -1684,7 +1921,7 @@ export default function NodeEditor({ active = true } = {}) {
         const imagePromptItems = connectedImagePromptItems(isSegmentation ? incoming.imagePromptIn || [] : [...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
         const prompt = isSegmentation
           ? basePrompt
-          : buildEffectiveImagePrompt(basePrompt, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], currentNode.data.aspectRatio);
+          : buildEffectiveImagePrompt(basePrompt, [...(incoming.imagePromptIn || []), ...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], currentNode.data.aspectRatio);
         const runIndexes = Array.from({ length: batchCount }, (_, index) => index);
         const settled = await settleSequential(runIndexes, (index) =>
           runImageModelGeneration({
@@ -1700,12 +1937,14 @@ export default function NodeEditor({ active = true } = {}) {
         const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
         const failures = settled.filter((item) => item.status === "rejected");
         if (!successes.length) throw new Error(failures[0]?.reason?.message || "Image generation failed.");
+        const resultItems = appendResultItems(previousImageResults, successes, "image");
+        const firstNewIndex = Math.max(0, resultItems.length - successes.length);
 
         updateNode(currentNode.id, {
           status: "complete",
           resultUrl: successes[0].url,
-          resultItems: successes,
-          selectedResultIndex: 0,
+          resultItems,
+          selectedResultIndex: firstNewIndex,
           resultText: successes.map((item) => item.text).filter(Boolean).join("\n\n"),
           error: failures.length ? nodeBatchStatusMessage("image", batchCount, successes.length, failures) : ""
         });
@@ -1727,12 +1966,14 @@ export default function NodeEditor({ active = true } = {}) {
       const successes = settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
       const failures = settled.filter((item) => item.status === "rejected");
       if (!successes.length) throw new Error(failures[0]?.reason?.message || "Video generation failed.");
+      const resultItems = appendResultItems(previousVideoResults, successes, "video");
+      const firstNewIndex = Math.max(0, resultItems.length - successes.length);
 
       updateNode(currentNode.id, {
         status: "complete",
         resultUrl: successes[0].url,
-        resultItems: successes,
-        selectedResultIndex: 0,
+        resultItems,
+        selectedResultIndex: firstNewIndex,
         resultText: "",
         error: failures.length ? nodeBatchStatusMessage("video", batchCount, successes.length, failures) : ""
       });
@@ -1822,6 +2063,15 @@ export default function NodeEditor({ active = true } = {}) {
 
   return (
     <section className={`node-workspace ${toolbarCollapsed ? "toolbar-collapsed" : ""}`}>
+      {composerEditorNode && (
+        <ComposerEditorModal
+          node={composerEditorNode}
+          incoming={incomingByNode[composerEditorNode.id] || {}}
+          onClose={() => setComposerEditorNodeId(null)}
+          onUpdate={(patch) => updateNode(composerEditorNode.id, patch)}
+          onCapture={(imageDataUrl) => captureComposerFrame(composerEditorNode, imageDataUrl)}
+        />
+      )}
       {toolbarCollapsed && (
         <button className="sidebar-restore" onClick={() => setToolbarCollapsed(false)} title="Show node palette">
           <PanelLeftOpen size={17} />
@@ -1954,6 +2204,7 @@ export default function NodeEditor({ active = true } = {}) {
               onDisconnectInput={disconnectInputPort}
               connectedPortKeys={connectedPortKeys}
               incoming={incomingByNode[node.id] || {}}
+              incomingByNode={incomingByNode}
               onRun={runNode}
               onUpload={uploadMediaAsset}
               onTransferImagesUpload={uploadTransferImages}
@@ -1961,6 +2212,7 @@ export default function NodeEditor({ active = true } = {}) {
               onTransferActivate={activateTransferNode}
               onTransferUnlock={unlockTransferNode}
               onPreviewResizeStart={startPreviewResize}
+              onOpenComposer={setComposerEditorNodeId}
               running={node.data.status === "running"}
               transferCompiling={compilingTransferNodeId === node.id}
               selected={selectedNodeSet.has(node.id)}
@@ -2108,6 +2360,7 @@ function NodeCard({
   onDisconnectInput,
   connectedPortKeys,
   incoming,
+  incomingByNode,
   onRun,
   onUpload,
   onTransferImagesUpload,
@@ -2115,6 +2368,7 @@ function NodeCard({
   onTransferActivate,
   onTransferUnlock,
   onPreviewResizeStart,
+  onOpenComposer,
   running,
   transferCompiling,
   selected
@@ -2144,7 +2398,7 @@ function NodeCard({
 
   return (
     <article
-      className={`node-card ${node.type} ${selected ? "selected" : ""}`}
+      className={`node-card ${node.type === "composer" ? "node-type-composer" : `${node.type} node-type-${node.type}`} ${selected ? "selected" : ""}`}
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, "--preview-scale": node.data.previewScale || 1 }}
       data-node-card-id={node.id}
       onPointerDown={(event) => onDragStart(event, node)}
@@ -2201,6 +2455,7 @@ function NodeCard({
         node={node}
         onUpdate={onUpdate}
         incoming={incoming}
+        incomingByNode={incomingByNode}
         onRun={onRun}
         running={running}
         onConnectStart={onConnectStart}
@@ -2212,6 +2467,7 @@ function NodeCard({
         onTransferActivate={onTransferActivate}
         onTransferUnlock={onTransferUnlock}
         onPreviewResizeStart={onPreviewResizeStart}
+        onOpenComposer={onOpenComposer}
         transferCompiling={transferCompiling}
       />
     </article>
@@ -2521,6 +2777,659 @@ function CameraControlViewport({ imageUrl, horizontalAngle, verticalAngle, zoom,
   );
 }
 
+function ComposerEditorModal({ node, incoming = {}, onClose, onUpdate, onCapture }) {
+  const viewportRef = React.useRef(null);
+  const [captureStatus, setCaptureStatus] = React.useState("");
+  const sceneData = normalizedComposerScene(node.data.composerScene);
+  const imageSources = connectedAssetItems(incoming.imageIn).filter((item) => item.type === "image" || /\.(png|jpe?g|webp|gif)$/i.test(item.url));
+  const composerObjects = [...sceneData.maquettes, ...sceneData.props, ...sceneData.imagePlanes];
+  const rawSelectedId = node.data.composerSelectedId || "";
+  const selectedId = composerObjects.some((item) => item.id === rawSelectedId) ? rawSelectedId : sceneData.maquettes[0]?.id || sceneData.props[0]?.id || sceneData.imagePlanes[0]?.id || "";
+  const selectedMaquette = sceneData.maquettes.find((item) => item.id === selectedId);
+  const selectedProp = sceneData.props.find((item) => item.id === selectedId);
+  const selectedImagePlane = sceneData.imagePlanes.find((item) => item.id === selectedId);
+  const selectedObject = selectedMaquette || selectedProp || selectedImagePlane;
+  const selectedKind = selectedMaquette ? "maquette" : selectedProp ? "prop" : selectedImagePlane ? "imagePlane" : "";
+  const rawSelectedCameraBookmark = node.data.composerSelectedCameraBookmark || "";
+  const activeCameraBookmark = sceneData.cameraBookmarks.find((item) => item.id === rawSelectedCameraBookmark) || sceneData.cameraBookmarks[0] || null;
+
+  function commitScene(nextScene, extraPatch = {}) {
+    onUpdate({
+      composerScene: normalizedComposerScene(nextScene),
+      ...extraPatch
+    });
+  }
+
+  function patchScene(patch) {
+    commitScene({ ...sceneData, ...patch });
+  }
+
+  function patchCamera(patch) {
+    patchScene({
+      camera: {
+        ...sceneData.camera,
+        ...patch
+      }
+    });
+  }
+
+  function patchSelected(patch) {
+    if (!selectedObject) return;
+    const key = selectedKind === "maquette" ? "maquettes" : selectedKind === "prop" ? "props" : "imagePlanes";
+    patchScene({
+      [key]: sceneData[key].map((item) => (item.id === selectedObject.id ? { ...item, ...patch } : item))
+    });
+  }
+
+  function addMaquette() {
+    const maquette = defaultComposerMaquette(sceneData.maquettes.length + 1);
+    commitScene({ ...sceneData, maquettes: [...sceneData.maquettes, maquette] }, { composerSelectedId: maquette.id });
+  }
+
+  function addBoxProp() {
+    const prop = defaultComposerProp(sceneData.props.length + 1);
+    commitScene({ ...sceneData, props: [...sceneData.props, prop] }, { composerSelectedId: prop.id });
+  }
+
+  function addImagePlane() {
+    const source = imageSources[0];
+    const imagePlane = defaultComposerImagePlane(sceneData.imagePlanes.length + 1, source?.url || "", source?.label || "");
+    commitScene({ ...sceneData, imagePlanes: [...sceneData.imagePlanes, imagePlane] }, { composerSelectedId: imagePlane.id });
+  }
+
+  function saveCameraBookmark() {
+    const highestNamedCamera = sceneData.cameraBookmarks.reduce((highest, bookmark) => {
+      const match = /^cam\s+(\d+)$/i.exec(bookmark.name || "");
+      return match ? Math.max(highest, Number(match[1])) : highest;
+    }, sceneData.cameraBookmarks.length);
+    const bookmark = {
+      id: `camera-bookmark-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `Cam ${highestNamedCamera + 1}`,
+      camera: { ...sceneData.camera }
+    };
+    commitScene({ ...sceneData, cameraBookmarks: [...sceneData.cameraBookmarks, bookmark] }, { composerSelectedCameraBookmark: bookmark.id });
+  }
+
+  function recallCameraBookmark(bookmarkId) {
+    const bookmark = sceneData.cameraBookmarks.find((item) => item.id === bookmarkId);
+    if (!bookmark) return;
+    commitScene({ ...sceneData, camera: { ...sceneData.camera, ...bookmark.camera } }, { composerSelectedCameraBookmark: bookmark.id });
+  }
+
+  function stepCameraBookmark(direction) {
+    if (!sceneData.cameraBookmarks.length) return;
+    const currentIndex = Math.max(0, sceneData.cameraBookmarks.findIndex((item) => item.id === activeCameraBookmark?.id));
+    const nextIndex = (currentIndex + direction + sceneData.cameraBookmarks.length) % sceneData.cameraBookmarks.length;
+    recallCameraBookmark(sceneData.cameraBookmarks[nextIndex].id);
+  }
+
+  function deleteCameraBookmark() {
+    if (!activeCameraBookmark) return;
+    const currentIndex = sceneData.cameraBookmarks.findIndex((item) => item.id === activeCameraBookmark.id);
+    const nextBookmarks = sceneData.cameraBookmarks.filter((item) => item.id !== activeCameraBookmark.id);
+    const nextBookmark = nextBookmarks[Math.min(Math.max(currentIndex, 0), nextBookmarks.length - 1)] || null;
+    const nextScene = {
+      ...sceneData,
+      cameraBookmarks: nextBookmarks,
+      camera: nextBookmark ? { ...sceneData.camera, ...nextBookmark.camera } : sceneData.camera
+    };
+    commitScene(nextScene, { composerSelectedCameraBookmark: nextBookmark?.id || "" });
+  }
+
+  function removeSelected() {
+    if (!selectedObject) return;
+    const nextMaquettes = sceneData.maquettes.filter((item) => item.id !== selectedObject.id);
+    const nextProps = sceneData.props.filter((item) => item.id !== selectedObject.id);
+    const nextImagePlanes = sceneData.imagePlanes.filter((item) => item.id !== selectedObject.id);
+    commitScene(
+      {
+        ...sceneData,
+        maquettes: nextMaquettes,
+        props: nextProps,
+        imagePlanes: nextImagePlanes
+      },
+      { composerSelectedId: nextMaquettes[0]?.id || nextProps[0]?.id || nextImagePlanes[0]?.id || "" }
+    );
+  }
+
+  async function captureFrame() {
+    const imageDataUrl = viewportRef.current?.capture();
+    if (!imageDataUrl) {
+      setCaptureStatus("Viewport not ready.");
+      return;
+    }
+
+    try {
+      setCaptureStatus("Capturing...");
+      await onCapture(imageDataUrl);
+      setCaptureStatus("Captured.");
+    } catch (error) {
+      setCaptureStatus(error.message || "Capture failed.");
+    }
+  }
+
+  return (
+    <div className="composer-modal" role="dialog" aria-modal="true" aria-label="Composer">
+      <div className="composer-shell" onPointerDown={(event) => event.stopPropagation()}>
+        <header className="composer-header">
+          <div>
+            <span>Composer</span>
+            <strong>{node.data.title || "Composer"}</strong>
+          </div>
+          <div className="composer-header-actions">
+            <select value={node.data.composerAspectRatio || "16:9"} onChange={(event) => onUpdate({ composerAspectRatio: event.target.value })} title="Frame aspect ratio">
+              <option>16:9</option>
+              <option>21:9</option>
+              <option>4:3</option>
+              <option>1:1</option>
+              <option>9:16</option>
+            </select>
+            <button className={`composer-toggle ${node.data.composerShowGuides !== false ? "enabled" : ""}`} onClick={() => onUpdate({ composerShowGuides: node.data.composerShowGuides === false })}>
+              Guides
+            </button>
+            <button onClick={captureFrame}>Capture Frame</button>
+            <button className="icon-only" onClick={onClose} title="Close Composer">
+              <X size={17} />
+            </button>
+          </div>
+        </header>
+
+        <main className="composer-main">
+          <ComposerViewport
+            ref={viewportRef}
+            sceneData={sceneData}
+            selectedId={selectedId}
+            aspectRatio={node.data.composerAspectRatio || "16:9"}
+            showGuides={node.data.composerShowGuides !== false}
+            onCameraChange={patchCamera}
+          />
+
+          <aside className="composer-controls">
+            <div className="composer-control-row trio">
+              <button onClick={addMaquette}>Add Maquette</button>
+              <button onClick={addBoxProp}>Add Box</button>
+              <button onClick={addImagePlane} disabled={!imageSources.length} title={imageSources.length ? "Add connected image plane" : "Connect an image to Composer"}>
+                Add Plane
+              </button>
+            </div>
+
+            <label className="composer-field">
+              <span>Selection</span>
+              <select value={selectedId} onChange={(event) => onUpdate({ composerSelectedId: event.target.value })}>
+                {sceneData.maquettes.map((item, index) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name || `Maquette ${index + 1}`}
+                  </option>
+                ))}
+                {sceneData.props.map((item, index) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name || `Box ${index + 1}`}
+                  </option>
+                ))}
+                {sceneData.imagePlanes.map((item, index) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name || `Image Plane ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {selectedObject ? (
+              <>
+                <label className="composer-field">
+                  <span>Name</span>
+                  <input value={selectedObject.name || ""} onChange={(event) => patchSelected({ name: event.target.value })} />
+                </label>
+                {selectedKind === "maquette" && (
+                  <label className="composer-field">
+                    <span>Color</span>
+                    <input type="color" value={selectedObject.color || "#d8c66a"} onChange={(event) => patchSelected({ color: event.target.value })} />
+                  </label>
+                )}
+                <ComposerRange label="X" min="-4" max="4" step="0.05" value={selectedObject.x} onChange={(value) => patchSelected({ x: value })} />
+                <ComposerRange label="Y" min="-1" max="4" step="0.05" value={selectedObject.y} onChange={(value) => patchSelected({ y: value })} />
+                <ComposerRange label="Z" min="-4" max="4" step="0.05" value={selectedObject.z} onChange={(value) => patchSelected({ z: value })} />
+                <ComposerRange label="Rot X" min="-360" max="360" step="1" value={selectedObject.rotX} onChange={(value) => patchSelected({ rotX: value })} />
+                <ComposerRange label="Rot Y" min="-360" max="360" step="1" value={selectedObject.rotY} onChange={(value) => patchSelected({ rotY: value })} />
+                <ComposerRange label="Rot Z" min="-360" max="360" step="1" value={selectedObject.rotZ} onChange={(value) => patchSelected({ rotZ: value })} />
+                <ComposerRange label="Scale" min="0.45" max="1.8" step="0.05" value={selectedObject.scale} onChange={(value) => patchSelected({ scale: value })} />
+
+                {selectedKind === "maquette" ? (
+                  <>
+                    <label className="composer-field">
+                      <span>Pose</span>
+                      <select value={selectedObject.pose || "standing"} onChange={(event) => patchSelected(composerPosePreset(event.target.value))}>
+                        <option value="standing">Standing</option>
+                        <option value="walk">Walk</option>
+                        <option value="run">Run</option>
+                        <option value="lean">Lean</option>
+                        <option value="reach">Reach</option>
+                      </select>
+                    </label>
+                    <ComposerRange label="L Upper Arm" min="-1.5" max="1.5" step="0.05" value={selectedObject.leftUpperArm} onChange={(value) => patchSelected({ leftUpperArm: value })} />
+                    <ComposerRange label="L Lower Arm" min="-1.5" max="1.5" step="0.05" value={selectedObject.leftLowerArm} onChange={(value) => patchSelected({ leftLowerArm: value })} />
+                    <ComposerRange label="R Upper Arm" min="-1.5" max="1.5" step="0.05" value={selectedObject.rightUpperArm} onChange={(value) => patchSelected({ rightUpperArm: value })} />
+                    <ComposerRange label="R Lower Arm" min="-1.5" max="1.5" step="0.05" value={selectedObject.rightLowerArm} onChange={(value) => patchSelected({ rightLowerArm: value })} />
+                    <ComposerRange label="L Upper Leg" min="-1.5" max="1.5" step="0.05" value={selectedObject.leftUpperLeg} onChange={(value) => patchSelected({ leftUpperLeg: value })} />
+                    <ComposerRange label="L Lower Leg" min="-1.5" max="1.5" step="0.05" value={selectedObject.leftLowerLeg} onChange={(value) => patchSelected({ leftLowerLeg: value })} />
+                    <ComposerRange label="R Upper Leg" min="-1.5" max="1.5" step="0.05" value={selectedObject.rightUpperLeg} onChange={(value) => patchSelected({ rightUpperLeg: value })} />
+                    <ComposerRange label="R Lower Leg" min="-1.5" max="1.5" step="0.05" value={selectedObject.rightLowerLeg} onChange={(value) => patchSelected({ rightLowerLeg: value })} />
+                    <ComposerRange label="Hand X" min="-1.4" max="1.4" step="0.05" value={selectedObject.handRotX} onChange={(value) => patchSelected({ handRotX: value })} />
+                    <ComposerRange label="Hand Y" min="-1.4" max="1.4" step="0.05" value={selectedObject.handRotY} onChange={(value) => patchSelected({ handRotY: value })} />
+                    <ComposerRange label="Hand Z" min="-1.4" max="1.4" step="0.05" value={selectedObject.handRotZ} onChange={(value) => patchSelected({ handRotZ: value })} />
+                    <ComposerRange label="Lean" min="-0.65" max="0.65" step="0.05" value={selectedObject.lean} onChange={(value) => patchSelected({ lean: value })} />
+                  </>
+                ) : selectedKind === "prop" ? (
+                  <>
+                    <label className="composer-field">
+                      <span>Color</span>
+                      <input type="color" value={selectedObject.color || "#496b8f"} onChange={(event) => patchSelected({ color: event.target.value })} />
+                    </label>
+                    <ComposerRange label="Width" min="0.25" max="4" step="0.05" value={selectedObject.width} onChange={(value) => patchSelected({ width: value })} />
+                    <ComposerRange label="Height" min="0.25" max="4" step="0.05" value={selectedObject.height} onChange={(value) => patchSelected({ height: value })} />
+                    <ComposerRange label="Depth" min="0.25" max="4" step="0.05" value={selectedObject.depth} onChange={(value) => patchSelected({ depth: value })} />
+                  </>
+                ) : (
+                  <>
+                    <label className="composer-field">
+                      <span>Image</span>
+                      <select value={selectedObject.imageUrl || ""} onChange={(event) => patchSelected({ imageUrl: event.target.value, name: imageSources.find((item) => item.url === event.target.value)?.label || selectedObject.name })}>
+                        <option value="">No image</option>
+                        {selectedObject.imageUrl && !imageSources.some((item) => item.url === selectedObject.imageUrl) && (
+                          <option value={selectedObject.imageUrl}>Current image</option>
+                        )}
+                        {imageSources.map((item) => (
+                          <option key={item.url} value={item.url}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <ComposerRange label="Width" min="0.25" max="8" step="0.05" value={selectedObject.width} onChange={(value) => patchSelected({ width: value })} />
+                    <ComposerRange label="Height" min="0.25" max="8" step="0.05" value={selectedObject.height} onChange={(value) => patchSelected({ height: value })} />
+                    <ComposerRange label="Opacity" min="0.1" max="1" step="0.05" value={selectedObject.opacity} onChange={(value) => patchSelected({ opacity: value })} />
+                  </>
+                )}
+
+                <button className="composer-danger" onClick={removeSelected}>
+                  Remove Selection
+                </button>
+              </>
+            ) : (
+              <div className="composer-empty-selection">Add a maquette or box to begin blocking.</div>
+            )}
+
+            <div className="composer-camera-panel">
+              <strong>Camera</strong>
+              <div className="composer-camera-bookmarks">
+                <button type="button" onClick={() => stepCameraBookmark(-1)} disabled={!sceneData.cameraBookmarks.length} title="Previous camera bookmark" aria-label="Previous camera bookmark">
+                  <ChevronLeft size={15} />
+                </button>
+                <button
+                  type="button"
+                  className="composer-camera-bookmark-current"
+                  onClick={() => activeCameraBookmark && recallCameraBookmark(activeCameraBookmark.id)}
+                  disabled={!activeCameraBookmark}
+                  title={activeCameraBookmark ? "Recall camera bookmark" : "No camera bookmarks"}
+                >
+                  {activeCameraBookmark?.name || "Cam 0"}
+                </button>
+                <button type="button" onClick={() => stepCameraBookmark(1)} disabled={!sceneData.cameraBookmarks.length} title="Next camera bookmark" aria-label="Next camera bookmark">
+                  <ChevronRight size={15} />
+                </button>
+                <button type="button" onClick={saveCameraBookmark} title="Save current camera" aria-label="Save current camera">
+                  <Save size={15} />
+                </button>
+                <button type="button" onClick={deleteCameraBookmark} disabled={!activeCameraBookmark} title="Delete camera bookmark" aria-label="Delete camera bookmark">
+                  <Trash2 size={15} />
+                </button>
+              </div>
+              <ComposerRange label="X" min="-10" max="10" step="0.05" value={sceneData.camera.x} onChange={(value) => patchCamera({ x: value })} />
+              <ComposerRange label="Y" min="0.25" max="8" step="0.05" value={sceneData.camera.y} onChange={(value) => patchCamera({ y: value })} />
+              <ComposerRange label="Z" min="-10" max="10" step="0.05" value={sceneData.camera.z} onChange={(value) => patchCamera({ z: value })} />
+              <ComposerRange label="Yaw" min="-360" max="360" step="1" value={sceneData.camera.yaw} onChange={(value) => patchCamera({ yaw: value })} />
+              <ComposerRange label="Pitch" min="-82" max="82" step="1" value={sceneData.camera.pitch} onChange={(value) => patchCamera({ pitch: value })} />
+              <ComposerRange label="Lens" min="18" max="80" step="1" value={sceneData.camera.fov} onChange={(value) => patchCamera({ fov: value })} />
+            </div>
+
+            {captureStatus && <small className="composer-status">{captureStatus}</small>}
+          </aside>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function ComposerRange({ label, value, min, max, step, onChange }) {
+  const numericValue = finiteNumber(value, 0);
+  const minValue = finiteNumber(min, 0);
+  const maxValue = finiteNumber(max, 1);
+  const stepValue = Math.max(finiteNumber(step, 1), 0.0001);
+  const precision = composerStepPrecision(stepValue);
+  const axis = composerAxisForLabel(label);
+  const inputRef = React.useRef(null);
+  const dragRef = React.useRef(null);
+  const editingRef = React.useRef(false);
+  const [draftValue, setDraftValue] = React.useState(formatComposerControlValue(numericValue, precision));
+  const [dragging, setDragging] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!editingRef.current && !dragRef.current) {
+      setDraftValue(formatComposerControlValue(numericValue, precision));
+    }
+  }, [numericValue, precision]);
+
+  function normalizedValue(nextValue) {
+    const clamped = clamp(nextValue, minValue, maxValue);
+    const rounded = Math.round(clamped / stepValue) * stepValue;
+    return Number(rounded.toFixed(Math.min(6, precision + 2)));
+  }
+
+  function commitValue(nextValue) {
+    if (!Number.isFinite(nextValue)) {
+      setDraftValue(formatComposerControlValue(numericValue, precision));
+      return;
+    }
+
+    const next = normalizedValue(nextValue);
+    setDraftValue(formatComposerControlValue(next, precision));
+    onChange(next);
+  }
+
+  function handlePointerDown(event) {
+    if (event.button !== 0) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startValue: numericValue,
+      dragging: false
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function handlePointerMove(event) {
+    if (!dragRef.current) return;
+    const deltaX = event.clientX - dragRef.current.startX;
+    if (!dragRef.current.dragging && Math.abs(deltaX) < 4) return;
+
+    dragRef.current.dragging = true;
+    editingRef.current = false;
+    setDragging(true);
+    event.preventDefault();
+    const dragMultiplier = event.shiftKey ? 10 : 1;
+    commitValue(dragRef.current.startValue + deltaX * stepValue * dragMultiplier);
+  }
+
+  function handlePointerUp(event) {
+    const dragState = dragRef.current;
+    dragRef.current = null;
+    setDragging(false);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (!dragState?.dragging) {
+      window.requestAnimationFrame(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      });
+    }
+  }
+
+  function handleFocus() {
+    editingRef.current = true;
+  }
+
+  function handleBlur() {
+    editingRef.current = false;
+    commitValue(Number(draftValue));
+  }
+
+  function handleKeyDown(event) {
+    if (event.key === "Enter") {
+      event.currentTarget.blur();
+    } else if (event.key === "Escape") {
+      editingRef.current = false;
+      setDraftValue(formatComposerControlValue(numericValue, precision));
+      event.currentTarget.blur();
+    }
+  }
+
+  return (
+    <label className="composer-field scrub">
+      <span>{label}</span>
+      <span className={`composer-scrub-input ${dragging ? "dragging" : ""}`} style={{ "--axis-color": composerAxisColor(axis) }}>
+        <input
+          ref={inputRef}
+          type="text"
+          inputMode="decimal"
+          value={draftValue}
+          onChange={(event) => setDraftValue(event.target.value)}
+          onFocus={handleFocus}
+          onBlur={handleBlur}
+          onKeyDown={handleKeyDown}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          title="Type a value, or drag left/right to slide"
+          aria-label={label}
+        />
+      </span>
+    </label>
+  );
+}
+
+function composerAxisForLabel(label = "") {
+  const axisMatch = String(label).match(/\b([XYZ])$/i);
+  return axisMatch ? axisMatch[1].toLowerCase() : "";
+}
+
+function composerAxisColor(axis) {
+  if (axis === "x") return "#ff5a2f";
+  if (axis === "y") return "#86d747";
+  if (axis === "z") return "#4d8dff";
+  return "#ddc631";
+}
+
+function composerStepPrecision(step) {
+  const [, decimals = ""] = String(step).split(".");
+  return Math.min(4, decimals.length);
+}
+
+function formatComposerControlValue(value, precision) {
+  return Number(value).toFixed(Math.max(0, precision));
+}
+
+const ComposerViewport = React.forwardRef(function ComposerViewport({ sceneData, selectedId, aspectRatio, showGuides, onCameraChange }, ref) {
+  const mountRef = React.useRef(null);
+  const rendererRef = React.useRef(null);
+  const sceneRef = React.useRef(null);
+  const cameraRef = React.useRef(null);
+  const stateRef = React.useRef({ sceneData, selectedId, aspectRatio, showGuides });
+  const onCameraChangeRef = React.useRef(onCameraChange);
+  const dragRef = React.useRef(null);
+  const keysRef = React.useRef(new Set());
+  const moveFrameRef = React.useRef(0);
+
+  React.useEffect(() => {
+    stateRef.current = { sceneData, selectedId, aspectRatio, showGuides };
+    onCameraChangeRef.current = onCameraChange;
+    renderComposerViewport(rendererRef.current, sceneRef.current, cameraRef.current, sceneData, selectedId);
+  }, [sceneData, selectedId, aspectRatio, showGuides, onCameraChange]);
+
+  React.useImperativeHandle(
+    ref,
+    () => ({
+      capture() {
+        const renderer = rendererRef.current;
+        const scene = sceneRef.current;
+        const camera = cameraRef.current;
+        if (!renderer || !scene || !camera) return "";
+        renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, "", {
+          showGrid: false,
+          showSelection: false
+        });
+        const imageDataUrl = renderer.domElement.toDataURL("image/png");
+        renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, stateRef.current.selectedId);
+        return imageDataUrl;
+      }
+    }),
+    []
+  );
+
+  React.useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return undefined;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(40, 16 / 9, 0.1, 100);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.domElement.className = "composer-canvas";
+    renderer.domElement.tabIndex = 0;
+    mount.appendChild(renderer.domElement);
+
+    sceneRef.current = scene;
+    cameraRef.current = camera;
+    rendererRef.current = renderer;
+
+    const resizeObserver = new ResizeObserver(() => {
+      const rect = mount.getBoundingClientRect();
+      renderer.setSize(Math.max(1, rect.width), Math.max(1, rect.height), false);
+      camera.aspect = Math.max(0.1, rect.width / Math.max(1, rect.height));
+      camera.updateProjectionMatrix();
+      renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, stateRef.current.selectedId);
+    });
+    resizeObserver.observe(mount);
+
+    function startDrag(event) {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      renderer.domElement.focus();
+      renderer.domElement.setPointerCapture(event.pointerId);
+      dragRef.current = {
+        x: event.clientX,
+        y: event.clientY,
+        camera: { ...stateRef.current.sceneData.camera }
+      };
+    }
+
+    function moveDrag(event) {
+      if (!dragRef.current) return;
+      const dx = event.clientX - dragRef.current.x;
+      const dy = event.clientY - dragRef.current.y;
+      onCameraChangeRef.current({
+        yaw: clamp(dragRef.current.camera.yaw - dx * 0.25, -360, 360),
+        pitch: clamp(dragRef.current.camera.pitch - dy * 0.18, -82, 82)
+      });
+    }
+
+    function stopDrag(event) {
+      dragRef.current = null;
+      if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+        renderer.domElement.releasePointerCapture(event.pointerId);
+      }
+    }
+
+    function handleWheel(event) {
+      event.preventDefault();
+      onCameraChangeRef.current({
+        fov: clamp(stateRef.current.sceneData.camera.fov + event.deltaY * 0.02, 18, 80)
+      });
+    }
+
+    function startMoveLoop() {
+      if (moveFrameRef.current) return;
+      const step = () => {
+        moveFrameRef.current = window.requestAnimationFrame(step);
+        if (!keysRef.current.size) return;
+
+        const cameraData = stateRef.current.sceneData.camera;
+        const speed = keysRef.current.has("shift") ? 0.16 : 0.07;
+        const yaw = THREE.MathUtils.degToRad(cameraData.yaw);
+        const pitch = THREE.MathUtils.degToRad(cameraData.pitch);
+        const forward = new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+        const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+        const delta = new THREE.Vector3();
+
+        if (keysRef.current.has("w")) delta.add(forward);
+        if (keysRef.current.has("s")) delta.sub(forward);
+        if (keysRef.current.has("d")) delta.add(right);
+        if (keysRef.current.has("a")) delta.sub(right);
+        if (keysRef.current.has("e")) delta.y += 1;
+        if (keysRef.current.has("q")) delta.y -= 1;
+        if (!delta.lengthSq()) return;
+        delta.normalize().multiplyScalar(speed);
+
+        const nextCamera = {
+          x: cameraData.x + delta.x,
+          y: clamp(cameraData.y + delta.y, 0.25, 8),
+          z: cameraData.z + delta.z
+        };
+        stateRef.current = {
+          ...stateRef.current,
+          sceneData: {
+            ...stateRef.current.sceneData,
+            camera: {
+              ...cameraData,
+              ...nextCamera
+            }
+          }
+        };
+        onCameraChangeRef.current(nextCamera);
+      };
+      moveFrameRef.current = window.requestAnimationFrame(step);
+    }
+
+    function handleKeyDown(event) {
+      const key = event.key.toLowerCase();
+      if (!["w", "a", "s", "d", "q", "e", "shift"].includes(key)) return;
+      event.preventDefault();
+      keysRef.current.add(key);
+      startMoveLoop();
+    }
+
+    function handleKeyUp(event) {
+      keysRef.current.delete(event.key.toLowerCase());
+    }
+
+    function clearKeys() {
+      keysRef.current.clear();
+    }
+
+    renderer.domElement.addEventListener("pointerdown", startDrag);
+    renderer.domElement.addEventListener("pointermove", moveDrag);
+    renderer.domElement.addEventListener("pointerup", stopDrag);
+    renderer.domElement.addEventListener("pointercancel", stopDrag);
+    renderer.domElement.addEventListener("wheel", handleWheel, { passive: false });
+    renderer.domElement.addEventListener("keydown", handleKeyDown);
+    renderer.domElement.addEventListener("keyup", handleKeyUp);
+    renderer.domElement.addEventListener("blur", clearKeys);
+
+    renderComposerViewport(renderer, scene, camera, stateRef.current.sceneData, stateRef.current.selectedId);
+
+    return () => {
+      resizeObserver.disconnect();
+      renderer.domElement.removeEventListener("pointerdown", startDrag);
+      renderer.domElement.removeEventListener("pointermove", moveDrag);
+      renderer.domElement.removeEventListener("pointerup", stopDrag);
+      renderer.domElement.removeEventListener("pointercancel", stopDrag);
+      renderer.domElement.removeEventListener("wheel", handleWheel);
+      renderer.domElement.removeEventListener("keydown", handleKeyDown);
+      renderer.domElement.removeEventListener("keyup", handleKeyUp);
+      renderer.domElement.removeEventListener("blur", clearKeys);
+      window.cancelAnimationFrame(moveFrameRef.current);
+      disposeComposerScene(scene);
+      renderer.dispose();
+      mount.innerHTML = "";
+    };
+  }, []);
+
+  return (
+    <div className="composer-viewport-shell" style={{ aspectRatio: composerAspectRatioValue(aspectRatio) }} ref={mountRef}>
+      {showGuides && <div className="composer-guides" aria-hidden="true" />}
+    </div>
+  );
+});
+
 function UploadIcon({ type }) {
   if (type === "image") return <FileImage size={22} />;
   if (type === "video") return <Video size={22} />;
@@ -2543,10 +3452,13 @@ function NodeBody({
   onTransferActivate,
   onTransferUnlock,
   onPreviewResizeStart,
+  onOpenComposer,
+  incomingByNode,
   transferCompiling
 }) {
   const config = getNodeConfig(node.type);
   const outputPort = config.output[0];
+  const resolvedPromptText = (items = []) => connectedText(items, incomingByNode);
 
   if (node.type === "text") {
     const hasOutputPanel = Boolean(node.data.resultText) || node.data.status === "running" || node.data.status === "complete";
@@ -2622,6 +3534,56 @@ function NodeBody({
         </label>
         {node.data.fileName && <small>{node.data.fileName}</small>}
         {node.data.status === "uploading" && <small className="upload-status">Uploading...</small>}
+        {node.data.error && <small className="upload-error">{node.data.error}</small>}
+      </div>
+    );
+  }
+
+  if (node.type === "composer") {
+    const promptOutputPort = config.output.find((port) => port.id === "promptOut");
+    const imageOutputPort = config.output.find((port) => port.id === "imageOut");
+    const promptInputPort = config.input.find((port) => port.id === "promptIn");
+    const imageInputPort = config.input.find((port) => port.id === "imageIn");
+    const promptValue = resolvedPromptText(incoming.promptIn) || node.data.prompt || "";
+    const promptConnected = Boolean(resolvedPromptText(incoming.promptIn));
+    const imagePlaneCount = connectedAssetItems(incoming.imageIn).length;
+
+    return (
+      <div className="node-body composer-node-body">
+        <div className="composer-input-port-stack" aria-label="Composer inputs">
+          {[promptInputPort, imageInputPort].filter(Boolean).map((port) => (
+            <PortHandle
+              key={port.id}
+              node={node}
+              port={port}
+              side="input"
+              onConnectStart={onConnectStart}
+              onDisconnectInput={onDisconnectInput}
+              connectedPortKeys={connectedPortKeys}
+            />
+          ))}
+        </div>
+        {promptOutputPort && <OutputPortRow node={node} port={promptOutputPort} label="Prompt output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />}
+        {imageOutputPort && <OutputPortRow node={node} port={imageOutputPort} label="Frame output" onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys} />}
+        <label className="composer-node-prompt">
+          <span>Prompt</span>
+          <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
+        </label>
+        <div className={`composer-node-preview ${node.data.resultUrl ? "" : "empty"}`}>
+          {node.data.resultUrl ? (
+            <img src={node.data.resultUrl} alt="Composer frame" />
+          ) : (
+            <>
+              <Box size={28} />
+              <span>No frame captured</span>
+            </>
+          )}
+        </div>
+        <button className="run-node-button" onClick={() => onOpenComposer?.(node.id)}>
+          Open Composer
+        </button>
+        <small className="model-status-note">{imagePlaneCount ? `${imagePlaneCount} image plane source${imagePlaneCount === 1 ? "" : "s"} connected.` : "Block camera, pose, scale, and layout with simple 3D maquettes."}</small>
+        {node.data.status === "uploading" && <small className="upload-status">Capturing...</small>}
         {node.data.error && <small className="upload-error">{node.data.error}</small>}
       </div>
     );
@@ -2827,8 +3789,17 @@ function NodeBody({
   }
 
   if (node.type === "preview") {
-    const previewSource = connectedPreviewSource(incoming.sourceIn);
+    const previewItems = connectedPreviewSources(incoming.sourceIn);
+    const previewIndex = Math.min(Math.max(Math.trunc(Number(node.data.previewSelectedIndex || 0)) || 0, 0), Math.max(0, previewItems.length - 1));
+    const previewSource = previewItems[previewIndex] || null;
+    const canStepPreview = previewItems.length > 1;
     const sourcePort = config.input.find((port) => port.id === "sourceIn");
+    function stepPreview(direction) {
+      if (!previewItems.length) return;
+      const nextIndex = (previewIndex + direction + previewItems.length) % previewItems.length;
+      onUpdate(node.id, { previewSelectedIndex: nextIndex });
+    }
+
     return (
       <div className="node-body preview-node-body">
         <NodeRow label="Source" inputPort={sourcePort} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -2839,6 +3810,17 @@ function NodeBody({
           {previewSource?.type === "video" && <video src={previewSource.url} controls />}
           {!previewSource && <span>Preview will appear here</span>}
         </div>
+        {canStepPreview && (
+          <div className="preview-frame-nav">
+            <button onClick={() => stepPreview(-1)} title="Previous preview" aria-label="Previous preview">
+              <ChevronLeft size={15} />
+            </button>
+            <span>{previewIndex + 1} / {previewItems.length}</span>
+            <button onClick={() => stepPreview(1)} title="Next preview" aria-label="Next preview">
+              <ChevronRight size={15} />
+            </button>
+          </div>
+        )}
         <button className="preview-resize-handle" onPointerDown={(event) => onPreviewResizeStart(event, node)} title="Resize preview" />
       </div>
     );
@@ -2868,8 +3850,8 @@ function NodeBody({
       label: isVideoMode ? "Video output" : "Image output",
       color: isVideoMode ? portColors.video : portColors.image
     };
-    const promptValue = connectedText(incoming.promptIn) || node.data.prompt || "";
-    const promptConnected = Boolean(connectedText(incoming.promptIn));
+    const promptValue = resolvedPromptText(incoming.promptIn) || node.data.prompt || "";
+    const promptConnected = Boolean(resolvedPromptText(incoming.promptIn));
     const collapsedPorts = isVideoMode
       ? utilityInputPortIds("video", utilityImageModel, utilityVideoModel)
           .map((portId) => config.input.find((port) => port.id === portId))
@@ -3024,7 +4006,13 @@ function NodeBody({
                     <input type="number" min="0" max="1" step="0.05" value={node.data.voidStrength || 1} onChange={(event) => onUpdate(node.id, { voidStrength: event.target.value })} />
                   </NodeRow>
                   <NodeRow label="Frames">
-                    <input type="number" min="69" max="197" step="8" value={node.data.voidNumFrames || 85} onChange={(event) => onUpdate(node.id, { voidNumFrames: event.target.value })} />
+                    <select value={String(normalizeVoidVideoFrameCount(node.data.voidNumFrames))} onChange={(event) => onUpdate(node.id, { voidNumFrames: event.target.value })}>
+                      {voidVideoFrameOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
                   </NodeRow>
                   <NodeRow label="Safety">
                     <button className={`node-toggle ${node.data.voidEnableSafetyChecker !== false ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { voidEnableSafetyChecker: node.data.voidEnableSafetyChecker === false })}>
@@ -3264,11 +4252,9 @@ function NodeBody({
   }
 
   if (node.type === "imageModel") {
-    const promptValue = connectedText(incoming.promptIn) || node.data.prompt;
-    const promptConnected = Boolean(connectedText(incoming.promptIn));
+    const promptValue = resolvedPromptText(incoming.promptIn) || node.data.prompt;
+    const promptConnected = Boolean(resolvedPromptText(incoming.promptIn));
     const isSam3Image = isSam3ImageModel(node.data.model);
-    const effectivePromptValue = isSam3Image ? promptValue : buildEffectiveImagePrompt(promptValue, [...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], node.data.aspectRatio);
-    const promptHasGeneratedAdditions = effectivePromptValue !== promptValue;
     const imagePromptLabel = connectedSummary(incoming.imagePromptIn, "Add file");
     const cameraPromptLabel = connectedSummary(incoming.cameraIn, "Add camera");
     const stylePromptLabel = connectedSummary(incoming.styleIn, "Add style");
@@ -3316,11 +4302,6 @@ function NodeBody({
           <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
             <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
           </NodeRow>
-          {promptHasGeneratedAdditions && (
-            <div className="effective-prompt-preview">
-              <span>Camera/style/transfer instructions applied</span>
-            </div>
-          )}
           <NodeRow label="Model">
             <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
               <option>Nano Banana Pro</option>
@@ -3374,8 +4355,8 @@ function NodeBody({
     );
   }
 
-  const promptValue = connectedText(incoming.promptIn) || node.data.prompt;
-  const promptConnected = Boolean(connectedText(incoming.promptIn));
+  const promptValue = resolvedPromptText(incoming.promptIn) || node.data.prompt;
+  const promptConnected = Boolean(resolvedPromptText(incoming.promptIn));
   const promptPort = config.input.find((port) => port.id === "promptIn");
   const startFramePort = config.input.find((port) => port.id === "startFrameIn");
   const endFramePort = config.input.find((port) => port.id === "endFrameIn");
@@ -3569,7 +4550,7 @@ function NodeBody({
         )}
       </details>
       {isAurora && <small className="upload-status model-status-note">lipsync model</small>}
-      {isSam3Video && <small className="upload-status model-status-note">segmentation model</small>}
+      {isSam3Video && <small className="upload-status model-status-note">segmentation mask model</small>}
     </div>
   );
 }
@@ -3658,6 +4639,17 @@ function getNodeConfig(type) {
         { id: "imageOut", label: "Image", color: portColors.image }
       ]
     },
+    composer: {
+      icon: Box,
+      input: [
+        { id: "promptIn", label: "Prompt", color: portColors.prompt },
+        { id: "imageIn", label: "Image Plane", color: portColors.image }
+      ],
+      output: [
+        { id: "promptOut", label: "Prompt", color: portColors.prompt },
+        { id: "imageOut", label: "Frame", color: portColors.image }
+      ]
+    },
     style: {
       icon: Palette,
       input: [],
@@ -3728,6 +4720,17 @@ function createDefaultNodeData(type, label, count) {
   if (type === "text") return { title, text: "" };
   if (type === "image" || type === "video" || type === "audio") return { title };
   if (type === "preview") return { title, previewScale: 1 };
+  if (type === "composer") {
+    const composerScene = defaultComposerScene();
+    return {
+      title,
+      prompt: "",
+      composerAspectRatio: "16:9",
+      composerShowGuides: true,
+      composerSelectedId: composerScene.maquettes[0]?.id || "",
+      composerScene
+    };
+  }
   if (type === "camera") {
     return {
       title,
@@ -3994,11 +4997,18 @@ function buildInactiveEdgeIds(nodes, edges) {
   );
 }
 
-function connectedText(items = []) {
+function connectedText(items = [], incomingByNode = null, visited = new Set()) {
   return items
     .map(({ source }) => {
       if (source.type === "text") return source.data.resultText || source.data.text;
       if (source.type === "imageModel" || source.type === "videoModel" || source.type === "utility") return source.data.resultText;
+      if (source.type === "composer") {
+        if (visited.has(source.id)) return source.data.prompt || "";
+        const nextVisited = new Set(visited);
+        nextVisited.add(source.id);
+        const incomingPrompt = incomingByNode ? connectedText(incomingByNode[source.id]?.promptIn || [], incomingByNode, nextVisited) : "";
+        return incomingPrompt || source.data.prompt || "";
+      }
       return source.data.title;
     })
     .filter(Boolean)
@@ -4007,6 +5017,20 @@ function connectedText(items = []) {
 
 function connectedAssetUrls(items = []) {
   return items.map(({ source }) => source.data.resultUrl).filter(Boolean);
+}
+
+function connectedAssetItems(items = []) {
+  return items
+    .map(({ source }) => {
+      const url = source.data.resultUrl;
+      if (!url) return null;
+      return {
+        url,
+        type: previewMediaType(source, { from: { port: "" }, to: { port: "" } }),
+        label: sourceLabel(source)
+      };
+    })
+    .filter(Boolean);
 }
 
 function connectedTextInputItems(items = []) {
@@ -4133,11 +5157,20 @@ async function runUtilityImageGeneration({ node, prompt, incoming, projectId, pr
 }
 
 async function fetchJsonApi(path, options, label) {
+  const requestUrl = localApiFetchUrl(path);
   let response;
   try {
-    response = await fetch(path, options);
+    response = await fetch(requestUrl, options);
   } catch (error) {
-    throw new Error(`${label} failed. Could not reach the local app server. Restart npm run dev and try again. ${error.message || ""}`.trim());
+    if (requestUrl !== path) {
+      try {
+        response = await fetch(path, options);
+      } catch {
+        throw new Error(`${label} failed. Could not reach the local app server. Restart npm run dev and try again. ${error.message || ""}`.trim());
+      }
+    } else {
+      throw new Error(`${label} failed. Could not reach the local app server. Restart npm run dev and try again. ${error.message || ""}`.trim());
+    }
   }
 
   try {
@@ -4146,12 +5179,18 @@ async function fetchJsonApi(path, options, label) {
       data: await readJsonResponse(response, label)
     };
   } catch (error) {
-    if (!error.htmlApiResponse || !canRetryLocalApi(path)) throw error;
+    if (!error.htmlApiResponse || !canRetryLocalApi(path) || requestUrl !== path) throw error;
 
     try {
       const healthResponse = await fetch("http://127.0.0.1:3333/api/health");
       const healthData = await readJsonResponse(healthResponse, "Server health");
-      const routeKey = path.includes("utility-image") ? "utilityImage" : path.includes("utility-video") ? "utilityVideo" : "";
+      const routeKey = path.includes("utility-image")
+        ? "utilityImage"
+        : path.includes("utility-video")
+          ? "utilityVideo"
+          : path.includes("composer-frame")
+            ? "composerFrame"
+            : "";
       if (!healthResponse.ok || (routeKey && !healthData?.routes?.[routeKey])) {
         throw new Error("The backend is running, but it does not have the updated Utility routes.");
       }
@@ -4175,10 +5214,13 @@ async function readJsonResponse(response, label) {
     return text ? JSON.parse(text) : {};
   } catch {
     const looksLikeHtml = text.trim().startsWith("<");
+    const statusText = response?.status ? `HTTP ${response.status}` : "unknown status";
+    const responseUrl = response?.url || "unknown URL";
+    const contentType = response?.headers?.get?.("content-type") || "unknown content type";
     const error = new Error(
       `${label} failed. ${
         looksLikeHtml
-          ? "The server returned an HTML page instead of API data. Restart npm run dev so the updated backend route is active."
+          ? `The server returned an HTML page instead of API data from ${responseUrl} (${statusText}, ${contentType}). Restart npm run dev so the updated backend route is active.`
           : "The server returned a response that was not valid JSON."
       }`
     );
@@ -4187,11 +5229,16 @@ async function readJsonResponse(response, label) {
   }
 }
 
+function localApiFetchUrl(path) {
+  if (!canRetryLocalApi(path)) return path;
+  return `http://127.0.0.1:3333${path}`;
+}
+
 function canRetryLocalApi(path) {
   if (!String(path || "").startsWith("/api/")) return false;
   if (typeof window === "undefined") return false;
   const hostname = window.location.hostname;
-  const isLocalhost = hostname === "127.0.0.1" || hostname === "localhost";
+  const isLocalhost = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "0.0.0.0";
   return isLocalhost && window.location.port !== "3333";
 }
 
@@ -4300,7 +5347,7 @@ async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, pr
         numInferenceSteps: node.data.voidNumInferenceSteps || 30,
         guidanceScale: node.data.voidGuidanceScale || 1,
         strength: node.data.voidStrength || 1,
-        numFrames: node.data.voidNumFrames || 85,
+        numFrames: normalizeVoidVideoFrameCount(node.data.voidNumFrames),
         enableSafetyChecker: node.data.voidEnableSafetyChecker !== false,
         seed: node.data.voidSeed || ""
       },
@@ -4357,6 +5404,20 @@ function normalizedResultItems(resultItems, resultUrl, type) {
   return resultUrl ? [{ url: resultUrl, type, label: type === "image" ? "Image 1" : "Video 1" }] : [];
 }
 
+function existingResultItemsForNode(node, type) {
+  return normalizedResultItems(node?.data?.resultItems, node?.data?.resultUrl, type);
+}
+
+function appendResultItems(previousItems = [], newItems = [], type) {
+  const combined = [...previousItems, ...normalizedResultItems(newItems, "", type)].filter((item) => item?.url);
+  const fallbackLabel = type === "image" ? "Image" : "Video";
+  return combined.map((item, index) => ({
+    ...item,
+    type: item.type || type,
+    label: item.label && !new RegExp(`^${fallbackLabel} \\d+$`).test(item.label) ? item.label : `${fallbackLabel} ${index + 1}`
+  }));
+}
+
 function nodeBatchCount(node) {
   const count = Number(node.data.batchCount || 1);
   return Math.min(4, Math.max(1, Number.isFinite(count) ? count : 1));
@@ -4373,16 +5434,20 @@ function nodeBatchStatusMessage(mediaType, total, completed, failures) {
   return `${completed} of ${total} ${label} generations complete.${firstError ? ` ${firstError}` : ""}`;
 }
 
-function connectedPreviewSource(items = []) {
-  const item = items.filter(({ source }) => source.data.resultUrl).at(-1);
-  if (!item) return null;
-  const { source, edge } = item;
-
-  return {
-    url: source.data.resultUrl,
-    type: previewMediaType(source, edge),
-    label: source.type === "camera" && edge.from.port === "imageOut" ? "Camera image" : sourceLabel(source)
-  };
+function connectedPreviewSources(items = []) {
+  return items
+    .filter(({ source }) => source.data.resultUrl)
+    .flatMap(({ source, edge }) => {
+      const sourceType = previewMediaType(source, edge);
+      const sourceName = source.type === "camera" && edge.from.port === "imageOut" ? "Camera image" : sourceLabel(source);
+      return normalizedResultItems(source.data.resultItems, source.data.resultUrl, sourceType).map((item, index, allItems) => ({
+        ...item,
+        sourceNodeId: source.id,
+        sourceResultIndex: index,
+        type: item.type || sourceType,
+        label: allItems.length > 1 ? `${sourceName} ${index + 1}` : sourceName
+      }));
+    });
 }
 
 function previewMediaType(source, edge) {
@@ -4398,7 +5463,7 @@ function connectedImagePromptItems(items = []) {
       if (!source.data.resultUrl) return null;
       return {
         url: source.data.resultUrl,
-        label: source.type === "transfer" ? "TRANSFER.png" : sourceLabel(source)
+        label: source.type === "composer" ? "Composer frame" : source.type === "transfer" ? "TRANSFER.png" : sourceLabel(source)
       };
     })
     .filter(Boolean);
@@ -4428,6 +5493,10 @@ function promptPiecesForSource(source) {
   if (source.type === "style") {
     const selectedPreset = source.data.stylePreset || "None";
     return [stylePresetPrompts[selectedPreset] || ""].filter(Boolean);
+  }
+
+  if (source.type === "composer" && source.data.resultUrl) {
+    return [composerReferencePrompt];
   }
 
   if (source.type !== "transfer" || !source.data.activated || !source.data.resultUrl) return [];
@@ -4464,6 +5533,7 @@ function connectedSummary(items = [], fallback) {
 
 function sourceLabel(source) {
   if (source.type === "camera") return cameraLabel(source);
+  if (source.type === "composer") return source.data.title || "Composer";
   if (source.type === "transfer" && source.data.resultUrl) return "TRANSFER.png";
   if (source.type === "style") return (source.data.stylePreset || "None") === "None" ? "Style" : source.data.stylePreset;
   if (source.type === "utility" && source.data.resultUrl) return utilityResultType(source) === "video" ? "Utility video" : "Utility image";
@@ -4572,9 +5642,382 @@ function sameStringList(first = [], second = []) {
   return first.every((value, index) => value === second[index]);
 }
 
+function normalizeComposerAspectRatio(value) {
+  return composerAspectRatios[String(value || "")] ? String(value) : "16:9";
+}
+
+function composerAspectRatioValue(value) {
+  return composerAspectRatios[normalizeComposerAspectRatio(value)];
+}
+
+function normalizedComposerScene(scene = null) {
+  const fallback = defaultComposerScene();
+  const hasScene = scene && typeof scene === "object";
+  const camera = hasScene && scene.camera ? scene.camera : fallback.camera;
+  const cameraPitch = finiteNumber(camera.pitch, fallback.camera.pitch);
+  const cameraYaw = finiteNumber(camera.yaw, fallback.camera.yaw);
+  const cameraDistance = finiteNumber(camera.distance, fallback.camera.distance);
+  const cameraTargetY = finiteNumber(camera.targetY, fallback.camera.targetY);
+  const hasFreeCameraPosition = Number.isFinite(Number(camera.x)) && Number.isFinite(Number(camera.y)) && Number.isFinite(Number(camera.z));
+  const legacyPitch = THREE.MathUtils.degToRad(cameraPitch);
+  const legacyYaw = THREE.MathUtils.degToRad(cameraYaw);
+  const legacyCameraPosition = {
+    x: Math.sin(legacyYaw) * Math.cos(legacyPitch) * cameraDistance,
+    y: cameraTargetY + Math.sin(legacyPitch) * cameraDistance,
+    z: Math.cos(legacyYaw) * Math.cos(legacyPitch) * cameraDistance
+  };
+  const maquetteSource = hasScene && Array.isArray(scene.maquettes) ? scene.maquettes : fallback.maquettes;
+  const propSource = hasScene && Array.isArray(scene.props) ? scene.props : fallback.props;
+  const imagePlaneSource = hasScene && Array.isArray(scene.imagePlanes) ? scene.imagePlanes : fallback.imagePlanes;
+  const cameraBookmarkSource = hasScene && Array.isArray(scene.cameraBookmarks) ? scene.cameraBookmarks : fallback.cameraBookmarks;
+
+  return {
+    camera: {
+      x: finiteNumber(camera.x, legacyCameraPosition.x),
+      y: finiteNumber(camera.y, legacyCameraPosition.y),
+      z: finiteNumber(camera.z, legacyCameraPosition.z),
+      yaw: cameraYaw,
+      pitch: hasFreeCameraPosition ? cameraPitch : -cameraPitch,
+      distance: cameraDistance,
+      fov: finiteNumber(camera.fov, fallback.camera.fov),
+      targetY: cameraTargetY
+    },
+    maquettes: maquetteSource.map((item, index) => {
+      const legacyUpperArm = finiteNumber(item?.upperArm, finiteNumber(item?.armSwing, 0));
+      const legacyLowerArm = finiteNumber(item?.lowerArm, finiteNumber(item?.armSwing, 0) * 0.65);
+      const legacyUpperLeg = finiteNumber(item?.upperLeg, finiteNumber(item?.legSwing, 0));
+      const legacyLowerLeg = finiteNumber(item?.lowerLeg, finiteNumber(item?.legSwing, 0) * -0.45);
+      return {
+        id: String(item?.id || `maquette-${index + 1}`),
+        name: String(item?.name || `Maquette ${index + 1}`),
+        x: finiteNumber(item?.x, 0),
+        y: finiteNumber(item?.y, 0),
+        z: finiteNumber(item?.z, 0),
+        rotX: finiteNumber(item?.rotX, 0),
+        rotY: finiteNumber(item?.rotY, finiteNumber(item?.yaw, 0)),
+        rotZ: finiteNumber(item?.rotZ, 0),
+        scale: finiteNumber(item?.scale, 1),
+        pose: composerPosePresets[item?.pose] ? item.pose : "standing",
+        leftUpperArm: finiteNumber(item?.leftUpperArm, legacyUpperArm),
+        leftLowerArm: finiteNumber(item?.leftLowerArm, legacyLowerArm),
+        rightUpperArm: finiteNumber(item?.rightUpperArm, -legacyUpperArm),
+        rightLowerArm: finiteNumber(item?.rightLowerArm, -legacyLowerArm),
+        leftUpperLeg: finiteNumber(item?.leftUpperLeg, legacyUpperLeg),
+        leftLowerLeg: finiteNumber(item?.leftLowerLeg, legacyLowerLeg),
+        rightUpperLeg: finiteNumber(item?.rightUpperLeg, -legacyUpperLeg),
+        rightLowerLeg: finiteNumber(item?.rightLowerLeg, -legacyLowerLeg),
+        handRotX: finiteNumber(item?.handRotX, 0),
+        handRotY: finiteNumber(item?.handRotY, 0),
+        handRotZ: finiteNumber(item?.handRotZ, 0),
+        lean: finiteNumber(item?.lean, 0),
+        color: String(item?.color || "#d8c66a")
+      };
+    }),
+    props: propSource.map((item, index) => ({
+      id: String(item?.id || `prop-${index + 1}`),
+      name: String(item?.name || `Box ${index + 1}`),
+      x: finiteNumber(item?.x, 1.4),
+      y: finiteNumber(item?.y, 0),
+      z: finiteNumber(item?.z, -0.4),
+      rotX: finiteNumber(item?.rotX, 0),
+      rotY: finiteNumber(item?.rotY, finiteNumber(item?.yaw, 0)),
+      rotZ: finiteNumber(item?.rotZ, 0),
+      scale: finiteNumber(item?.scale, 1),
+      width: finiteNumber(item?.width, 0.9),
+      height: finiteNumber(item?.height, 0.9),
+      depth: finiteNumber(item?.depth, 0.9),
+      color: String(item?.color || "#496b8f")
+    })),
+    imagePlanes: imagePlaneSource.map((item, index) => ({
+      id: String(item?.id || `image-plane-${index + 1}`),
+      name: String(item?.name || `Image Plane ${index + 1}`),
+      imageUrl: String(item?.imageUrl || ""),
+      x: finiteNumber(item?.x, 0),
+      y: finiteNumber(item?.y, 1.15),
+      z: finiteNumber(item?.z, -1.4),
+      rotX: finiteNumber(item?.rotX, 0),
+      rotY: finiteNumber(item?.rotY, 0),
+      rotZ: finiteNumber(item?.rotZ, 0),
+      scale: finiteNumber(item?.scale, 1),
+      width: finiteNumber(item?.width, 2),
+      height: finiteNumber(item?.height, 1.125),
+      opacity: finiteNumber(item?.opacity, 1)
+    })),
+    cameraBookmarks: cameraBookmarkSource.map((item, index) => ({
+      id: String(item?.id || `camera-bookmark-${index + 1}`),
+      name: String(item?.name || `Cam ${index + 1}`),
+      camera: {
+        x: finiteNumber(item?.camera?.x, fallback.camera.x),
+        y: finiteNumber(item?.camera?.y, fallback.camera.y),
+        z: finiteNumber(item?.camera?.z, fallback.camera.z),
+        yaw: finiteNumber(item?.camera?.yaw, fallback.camera.yaw),
+        pitch: finiteNumber(item?.camera?.pitch, fallback.camera.pitch),
+        fov: finiteNumber(item?.camera?.fov, fallback.camera.fov),
+        distance: finiteNumber(item?.camera?.distance, fallback.camera.distance),
+        targetY: finiteNumber(item?.camera?.targetY, fallback.camera.targetY)
+      }
+    }))
+  };
+}
+
+function composerPosePreset(pose) {
+  const preset = composerPosePresets[pose] || composerPosePresets.standing;
+  return {
+    pose: preset.pose,
+    leftUpperArm: preset.upperArm,
+    leftLowerArm: preset.lowerArm,
+    rightUpperArm: -preset.upperArm,
+    rightLowerArm: -preset.lowerArm,
+    leftUpperLeg: preset.upperLeg,
+    leftLowerLeg: preset.lowerLeg,
+    rightUpperLeg: -preset.upperLeg,
+    rightLowerLeg: -preset.lowerLeg,
+    lean: preset.lean
+  };
+}
+
+function renderComposerViewport(renderer, scene, camera, sceneData, selectedId, options = {}) {
+  if (!renderer || !scene || !camera) return;
+  const showGrid = options.showGrid !== false;
+  const showSelection = options.showSelection !== false;
+  const data = normalizedComposerScene(sceneData);
+  disposeComposerScene(scene);
+  scene.clear();
+  scene.background = new THREE.Color(0x111111);
+
+  camera.fov = data.camera.fov;
+  const yaw = THREE.MathUtils.degToRad(data.camera.yaw);
+  const pitch = THREE.MathUtils.degToRad(data.camera.pitch);
+  camera.position.set(data.camera.x, data.camera.y, data.camera.z);
+  camera.rotation.order = "YXZ";
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+  camera.rotation.z = 0;
+  camera.updateProjectionMatrix();
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x222222, 2.1));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
+  keyLight.position.set(3, 6, 4);
+  scene.add(keyLight);
+
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(12, 12),
+    new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.82, metalness: 0.02 })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  scene.add(floor);
+
+  if (showGrid) {
+    const grid = new THREE.GridHelper(12, 24, 0x444444, 0x2a2a2a);
+    grid.position.y = 0.004;
+    scene.add(grid);
+  }
+
+  [
+    ...data.imagePlanes.map((plane) => createComposerImagePlane(plane, renderer, scene, camera)),
+    ...data.props.map(createComposerProp),
+    ...data.maquettes.map(createComposerMaquette)
+  ].forEach((object) => {
+    scene.add(object);
+    if (showSelection && object.userData.id === selectedId) {
+      const box = new THREE.Box3().setFromObject(object);
+      scene.add(new THREE.Box3Helper(box, 0xf0c83b));
+    }
+  });
+
+  renderer.render(scene, camera);
+}
+
+function disposeComposerScene(scene) {
+  scene.traverse((object) => {
+    if (object.geometry) object.geometry.dispose?.();
+    if (object.material) {
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach((material) => {
+        material.map?.dispose?.();
+        material.dispose?.();
+      });
+    }
+  });
+}
+
+function createComposerProp(prop) {
+  const group = new THREE.Group();
+  group.userData.id = prop.id;
+  group.position.set(prop.x, prop.y + (prop.height * prop.scale) / 2, prop.z);
+  group.rotation.set(THREE.MathUtils.degToRad(prop.rotX), THREE.MathUtils.degToRad(prop.rotY), THREE.MathUtils.degToRad(prop.rotZ));
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(prop.width, prop.height, prop.depth),
+    new THREE.MeshStandardMaterial({ color: new THREE.Color(prop.color), roughness: 0.74 })
+  );
+  mesh.scale.setScalar(prop.scale);
+  group.add(mesh);
+  return group;
+}
+
+function createComposerImagePlane(plane, renderer, scene, camera) {
+  const group = new THREE.Group();
+  group.userData.id = plane.id;
+  group.position.set(plane.x, plane.y, plane.z);
+  group.rotation.set(THREE.MathUtils.degToRad(plane.rotX), THREE.MathUtils.degToRad(plane.rotY), THREE.MathUtils.degToRad(plane.rotZ));
+  group.scale.setScalar(plane.scale);
+
+  const material = new THREE.MeshBasicMaterial({
+    color: plane.imageUrl ? 0xffffff : 0x2b2b2b,
+    opacity: clamp(plane.opacity, 0.1, 1),
+    transparent: true,
+    side: THREE.DoubleSide
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(plane.width, plane.height), material);
+  group.add(mesh);
+
+  if (plane.imageUrl) {
+    new THREE.TextureLoader().load(
+      plane.imageUrl,
+      (texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        material.map = texture;
+        material.needsUpdate = true;
+        renderer.render(scene, camera);
+      },
+      undefined,
+      () => {
+        material.color.set(0x5b4d20);
+        renderer.render(scene, camera);
+      }
+    );
+  }
+
+  return group;
+}
+
+function createComposerMaquette(maquette) {
+  const color = new THREE.Color(maquette.color || "#d8c66a");
+  const dark = color.clone().multiplyScalar(0.55);
+  const material = new THREE.MeshStandardMaterial({ color, roughness: 0.72 });
+  const jointMaterial = new THREE.MeshStandardMaterial({ color: dark, roughness: 0.75 });
+  const group = new THREE.Group();
+  group.userData.id = maquette.id;
+  group.position.set(maquette.x, maquette.y, maquette.z);
+  group.rotation.set(THREE.MathUtils.degToRad(maquette.rotX), THREE.MathUtils.degToRad(maquette.rotY), THREE.MathUtils.degToRad(maquette.rotZ));
+  group.scale.setScalar(maquette.scale);
+
+  const root = new THREE.Group();
+  root.rotation.x = maquette.lean;
+  root.position.y = 0.05;
+  group.add(root);
+
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.42, 0.95, 18), material);
+  torso.position.y = 1.35;
+  root.add(torso);
+
+  const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.64, 0.28, 0.34), material);
+  pelvis.position.y = 0.83;
+  root.add(pelvis);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 24, 16), material);
+  head.scale.set(0.86, 1.08, 0.92);
+  head.position.y = 2.1;
+  root.add(head);
+
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.075, 0.22, 14), jointMaterial);
+  nose.position.set(0, 2.1, -0.27);
+  nose.rotation.x = -Math.PI / 2;
+  root.add(nose);
+
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.13, 0.24, 14), jointMaterial);
+  neck.position.y = 1.82;
+  root.add(neck);
+
+  const shoulderY = 1.7;
+  const hipY = 0.74;
+  addComposerArm(root, { side: -1, shoulderY, upper: maquette.leftUpperArm, lower: maquette.leftLowerArm, hand: maquette, material, jointMaterial });
+  addComposerArm(root, { side: 1, shoulderY, upper: maquette.rightUpperArm, lower: maquette.rightLowerArm, hand: maquette, material, jointMaterial });
+  addComposerLeg(root, { side: -1, hipY, upper: maquette.leftUpperLeg, lower: maquette.leftLowerLeg, material });
+  addComposerLeg(root, { side: 1, hipY, upper: maquette.rightUpperLeg, lower: maquette.rightLowerLeg, material });
+
+  [
+    [-0.43, shoulderY, 0],
+    [0.43, shoulderY, 0],
+    [-0.22, hipY, 0],
+    [0.22, hipY, 0]
+  ].forEach(([x, y, z]) => {
+    const joint = new THREE.Mesh(new THREE.SphereGeometry(0.1, 16, 12), jointMaterial);
+    joint.position.set(x, y, z);
+    root.add(joint);
+  });
+
+  return group;
+}
+
+function addComposerArm(root, { side, shoulderY, upper, lower, hand, material, jointMaterial }) {
+  const shoulder = new THREE.Group();
+  shoulder.position.set(side * 0.43, shoulderY, 0);
+  shoulder.rotation.x = upper;
+  shoulder.rotation.z = side * 0.24;
+  root.add(shoulder);
+
+  const upperArm = addLimb(shoulder, { x: 0, y: 0, z: 0, length: 0.58, radius: 0.07, rotX: 0, rotZ: 0, material });
+  upperArm.position.y = -0.29;
+
+  const elbow = new THREE.Group();
+  elbow.position.y = -0.58;
+  elbow.rotation.x = lower;
+  shoulder.add(elbow);
+
+  const forearm = addLimb(elbow, { x: 0, y: 0, z: 0, length: 0.54, radius: 0.058, rotX: 0, rotZ: 0, material });
+  forearm.position.y = -0.27;
+
+  const wrist = new THREE.Group();
+  wrist.position.y = -0.54;
+  wrist.rotation.set(hand.handRotX, hand.handRotY, side * hand.handRotZ);
+  elbow.add(wrist);
+
+  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.12, 0.055), material);
+  wrist.add(palm);
+  const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.11, 0.04), jointMaterial);
+  thumb.position.set(side * 0.08, 0.005, -0.015);
+  thumb.rotation.z = side * 0.7;
+  wrist.add(thumb);
+}
+
+function addComposerLeg(root, { side, hipY, upper, lower, material }) {
+  const hip = new THREE.Group();
+  hip.position.set(side * 0.22, hipY, 0);
+  hip.rotation.x = upper;
+  hip.rotation.z = side * 0.07;
+  root.add(hip);
+
+  const upperLeg = addLimb(hip, { x: 0, y: 0, z: 0, length: 0.66, radius: 0.085, rotX: 0, rotZ: 0, material });
+  upperLeg.position.y = -0.33;
+
+  const knee = new THREE.Group();
+  knee.position.y = -0.66;
+  knee.rotation.x = lower;
+  hip.add(knee);
+
+  const lowerLeg = addLimb(knee, { x: 0, y: 0, z: 0, length: 0.62, radius: 0.075, rotX: 0, rotZ: 0, material });
+  lowerLeg.position.y = -0.31;
+}
+
+function addLimb(root, { x, y, z, length, radius, rotX, rotZ, material }) {
+  const limb = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius * 0.92, length, 14), material);
+  limb.position.set(x, y - length / 2, z);
+  limb.rotation.x = rotX;
+  limb.rotation.z = rotZ;
+  root.add(limb);
+  return limb;
+}
+
 function finiteNumber(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizeVoidVideoFrameCount(value) {
+  const numeric = Number.parseInt(value, 10);
+  const target = Number.isFinite(numeric) ? numeric : 85;
+  return voidVideoFrameOptions.reduce((nearest, option) => (Math.abs(option - target) < Math.abs(nearest - target) ? option : nearest), 85);
 }
 
 function isRunnableNode(node) {
@@ -4803,7 +6246,29 @@ function normalizeCurrentNode(node) {
     };
   }
 
+  if (nextNode.type === "composer") {
+    return {
+      ...nextNode,
+      data: normalizeComposerData(data)
+    };
+  }
+
   return nextNode;
+}
+
+function normalizeComposerData(data = {}) {
+  const composerScene = normalizedComposerScene(data.composerScene);
+  const selectedStillExists = [...composerScene.maquettes, ...composerScene.props, ...composerScene.imagePlanes].some((item) => item.id === data.composerSelectedId);
+  return {
+    ...data,
+    title: data.title || "Composer",
+    prompt: data.prompt || "",
+    composerAspectRatio: normalizeComposerAspectRatio(data.composerAspectRatio),
+    composerShowGuides: data.composerShowGuides !== false,
+    composerSelectedId: selectedStillExists ? data.composerSelectedId : composerScene.maquettes[0]?.id || composerScene.props[0]?.id || composerScene.imagePlanes[0]?.id || "",
+    composerSelectedCameraBookmark: data.composerSelectedCameraBookmark || "",
+    composerScene
+  };
 }
 
 function normalizeUtilityData(data = {}) {
@@ -4826,6 +6291,7 @@ function normalizeUtilityData(data = {}) {
     numFrames: data.numFrames || 81,
     matchInputFps: data.matchInputFps !== false,
     fps: data.fps || 16,
+    voidNumFrames: normalizeVoidVideoFrameCount(data.voidNumFrames),
     rifeNumFrames: data.rifeNumFrames || 1,
     rifeUseSceneDetection: data.rifeUseSceneDetection !== false,
     rifeUseCalculatedFps: data.rifeUseCalculatedFps !== false,
@@ -4987,6 +6453,7 @@ function isCameraImageEdge(edge, target) {
   if (edge.to.port === "sourceIn") return true;
   if (target?.type === "text" && edge.to.port === "imageIn") return true;
   if (target?.type === "camera" && edge.to.port === "imageIn") return true;
+  if (target?.type === "composer" && edge.to.port === "imageIn") return true;
   if (target?.type === "imageModel" && ["imagePromptIn", "transferIn"].includes(edge.to.port)) return true;
   if (target?.type === "videoModel" && ["startFrameIn", "endFrameIn", "referenceImageIn"].includes(edge.to.port)) return true;
   if (target?.type === "utility" && ["imageIn", "referenceImageIn"].includes(edge.to.port)) return true;

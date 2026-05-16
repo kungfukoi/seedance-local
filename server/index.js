@@ -52,6 +52,7 @@ const falVideoTextModel = process.env.FAL_VIDEO_TEXT_MODEL || "google/gemini-2.5
 const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
 const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
+const voidVideoFrameOptions = [69, 77, 85, 93, 101, 109, 117, 125, 133, 141, 149, 157, 165, 173, 181, 189, 197];
 
 const app = express();
 
@@ -79,7 +80,7 @@ const upload = multer({
 });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "16mb" }));
 app.use("/uploads", express.static(uploadsDir));
 app.use("/outputs", express.static(outputsDir));
 
@@ -88,7 +89,11 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     routes: {
       utilityImage: true,
-      utilityVideo: true
+      utilityVideo: true,
+      composerFrame: true,
+      apiJsonErrors: true,
+      voidFrameValidation: true,
+      sam3VideoMaskOutput: true
     },
     falKeyConfigured: Boolean(process.env.FAL_KEY),
     openAiKeyConfigured: Boolean(process.env.OPENAI_API_KEY || openAiTextApiKey || openAiImageApiKey),
@@ -319,6 +324,73 @@ app.post("/api/node/upload-asset", upload.single("asset"), async (req, res) => {
   });
 });
 
+app.post("/api/node/composer-frame", async (req, res) => {
+  try {
+    const imageDataUrl = String(req.body.imageDataUrl || "");
+    const match = imageDataUrl.match(/^data:image\/png;base64,([a-z0-9+/=]+)$/i);
+    if (!match) {
+      return res.status(400).json({ error: "Composer frame must be a PNG data URL." });
+    }
+
+    const bytes = Buffer.from(match[1], "base64");
+    if (!bytes.length) {
+      return res.status(400).json({ error: "Composer frame was empty." });
+    }
+
+    const fileName = uniqueOutputFileName("composer-frame", ".png");
+    await writeFile(path.join(outputsDir, fileName), bytes);
+    const localUrl = `/outputs/${fileName}`;
+    const title = String(req.body.nodeTitle || "Composer").trim() || "Composer";
+    const cost = {
+      amountUsd: 0,
+      currency: "USD",
+      unitRateUsd: 0,
+      units: 1,
+      unit: "local capture",
+      mediaType: "image",
+      pricingBasis: "Local Composer viewport capture",
+      pricingSource: "local-composer"
+    };
+
+    await appendHistory({
+      id: randomUUID(),
+      createdAt: new Date().toISOString(),
+      mediaType: "image",
+      provider: "local",
+      modelName: "Composer",
+      endpoint: "local/composer-frame",
+      mode: "Composer frame capture",
+      prompt: title,
+      submittedPrompt: title,
+      project: projectFromBody(req.body),
+      node: nodeFromBody(req.body),
+      settings: {
+        maquetteCount: Number(req.body.maquetteCount || 0),
+        propCount: Number(req.body.propCount || 0),
+        imagePlaneCount: Number(req.body.imagePlaneCount || 0),
+        aspectRatio: req.body.aspectRatio || "16:9"
+      },
+      cost,
+      localImage: localUrl,
+      outputFileName: fileName,
+      outputBytes: bytes.length,
+      text: "Composer frame capture."
+    });
+
+    res.json({
+      image: {
+        localUrl,
+        fileName,
+        mimeType: "image/png"
+      },
+      cost
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message || "Composer capture failed." });
+  }
+});
+
 app.post("/api/node/upload-style-collage", upload.single("asset"), async (req, res) => {
   return handleTransferCollageUpload(req, res);
 });
@@ -414,6 +486,7 @@ app.post("/api/node/generate-image", async (req, res) => {
     const selectedModel = resolveImageModel(req.body.model);
     const imagePromptUrls = Array.isArray(req.body.imagePromptUrls) ? req.body.imagePromptUrls.filter(isLocalAssetUrl) : [];
     const imagePromptLabels = Array.isArray(req.body.imagePromptLabels) ? req.body.imagePromptLabels : [];
+    const cleanReferenceLabels = imagePromptUrls.map((_, index) => cleanImagePromptLabel(imagePromptLabels[index])).filter(Boolean);
 
     if (selectedModel.provider === "disabled") {
       return res.status(400).json({ error: `${selectedModel.displayName} is temporarily disabled.` });
@@ -466,7 +539,8 @@ app.post("/api/node/generate-image", async (req, res) => {
           resolution: req.body.resolution || "2K",
           imageSize: openAiImage.size,
           quality: openAiImage.quality,
-          imagePromptCount: imagePromptUrls.length
+          imagePromptCount: imagePromptUrls.length,
+          imagePromptLabels: cleanReferenceLabels
         },
         cost,
         localImage: `/outputs/${fileName}`,
@@ -502,7 +576,7 @@ app.post("/api/node/generate-image", async (req, res) => {
       if (!asset.mimeType.startsWith("image/")) continue;
       const label = cleanImagePromptLabel(imagePromptLabels[index]);
       if (label) {
-        parts.push({ text: `Reference image label: ${label}` });
+        parts.push({ text: imageReferenceLabelPrompt(label) });
       }
       parts.push({
         inlineData: {
@@ -532,7 +606,7 @@ app.post("/api/node/generate-image", async (req, res) => {
       provider: "Google",
       modelName: selectedModel.displayName,
       endpoint: model,
-      mode: "Image generation",
+      mode: imagePromptUrls.length ? "Image generation with references" : "Image generation",
       prompt,
       submittedPrompt: prompt,
       project: projectFromBody(req.body),
@@ -543,7 +617,8 @@ app.post("/api/node/generate-image", async (req, res) => {
         resolution: req.body.resolution || "2K",
         imageConfig,
         attempts,
-        imagePromptCount: imagePromptUrls.length
+        imagePromptCount: imagePromptUrls.length,
+        imagePromptLabels: cleanReferenceLabels
       },
       cost,
       localImage: `/outputs/${fileName}`,
@@ -707,7 +782,7 @@ app.post("/api/node/utility-image", async (req, res) => {
     return res.status(400).json({ error: "Unsupported Utility image model." });
   } catch (error) {
     console.error(error);
-    res.status(errorStatusCode(error)).json({ error: publicErrorMessage(error, "Utility image failed.") });
+    sendApiError(res, error, "Utility image failed.");
   }
 });
 
@@ -1129,7 +1204,7 @@ app.post("/api/node/utility-video", async (req, res) => {
     return res.status(400).json({ error: "Unsupported Utility video model." });
   } catch (error) {
     console.error(error);
-    res.status(errorStatusCode(error)).json({ error: publicErrorMessage(error, "Utility video failed.") });
+    sendApiError(res, error, "Utility video failed.");
   }
 });
 
@@ -1377,7 +1452,7 @@ async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }
   const input = {
     video_url: await uploadLocalOutputToFal(videoUrl),
     prompt,
-    apply_mask: true,
+    apply_mask: false,
     video_output_type: "X264 (.mp4)",
     detection_threshold: clampNumber(options.detectionThreshold, 0, 1, 0.5)
   };
@@ -1389,7 +1464,7 @@ async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }
     return res.status(502).json({ error: "Fal returned no segmentation video URL.", raw: result?.data });
   }
 
-  const output = await downloadVideo(remoteVideo.url, "sam-3-video-segmentation");
+  const output = await downloadVideo(remoteVideo.url, "sam-3-video-mask");
   const cost = estimateSam3VideoCost({ endpoint, frames: videoFrameCount(remoteVideo, result?.data) });
 
   await appendHistory({
@@ -1399,7 +1474,7 @@ async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }
     provider: "fal.ai",
     modelName: "SAM 3 Video",
     endpoint,
-    mode: "SAM 3 video segmentation",
+    mode: "SAM 3 video mask",
     prompt,
     submittedPrompt: prompt,
     project: projectFromBody(req.body),
@@ -1596,21 +1671,26 @@ async function runVoidVideoInpaintingUtility(req, res, { prompt, referenceVideoU
   }
 
   const options = req.body.voidVideoInpainting || {};
+  const maskPrompt = String(options.maskPrompt || "").trim();
+  const maskVideoUrl = firstLocalOutput(maskVideoUrls);
+  if (!maskVideoUrl && !maskPrompt) {
+    return res.status(400).json({ error: "VOID Video Inpainting requires either a Mask Prompt or a connected mask video." });
+  }
+
   const endpoint = selectedVideoModel.id;
   const input = {
     video_url: await uploadLocalOutputToFal(videoUrl),
     prompt,
-    mask_prompt: String(options.maskPrompt || "").trim(),
+    mask_prompt: maskPrompt,
     enable_pass2_refinement: Boolean(options.enablePass2Refinement),
     negative_prompt: String(options.negativePrompt || ""),
     num_inference_steps: clampInteger(options.numInferenceSteps, 1, 80, 30),
     guidance_scale: clampNumber(options.guidanceScale, 0, 20, 1),
     strength: clampNumber(options.strength, 0, 1, 1),
-    num_frames: clampInteger(options.numFrames, 69, 197, 85),
+    num_frames: normalizeVoidVideoFrameCount(options.numFrames),
     enable_safety_checker: options.enableSafetyChecker !== false
   };
   const seed = optionalInteger(options.seed);
-  const maskVideoUrl = firstLocalOutput(maskVideoUrls);
   if (seed !== undefined) input.seed = seed;
   if (maskVideoUrl) input.quad_mask_video_url = await uploadLocalOutputToFal(maskVideoUrl);
 
@@ -1668,9 +1748,18 @@ async function runVoidVideoInpaintingUtility(req, res, { prompt, referenceVideoU
     cost,
     video: {
       ...remoteVideo,
+      label: "SAM 3 Mask",
       localUrl: output.publicPath,
       fileName: output.fileName
-    }
+    },
+    videos: [
+      {
+        ...remoteVideo,
+        label: "SAM 3 Mask",
+        localUrl: output.publicPath,
+        fileName: output.fileName
+      }
+    ]
   });
 }
 
@@ -2004,6 +2093,11 @@ app.post(
   }
 );
 
+app.use("/api", (error, _req, res, _next) => {
+  console.error(error);
+  sendApiError(res, error, "API request failed.");
+});
+
 app.listen(port, "127.0.0.1", () => {
   console.log(`NewtNode server running on http://127.0.0.1:${port}`);
 });
@@ -2079,6 +2173,16 @@ function cleanImagePromptLabel(value) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 80);
+}
+
+function imageReferenceLabelPrompt(label) {
+  const cleanLabel = cleanImagePromptLabel(label);
+  if (!cleanLabel) return "";
+  if (/composer/i.test(cleanLabel)) {
+    return `Reference image label: ${cleanLabel}. This is a Composer frame for composition and blocking control. Use its camera angle, framing, horizon, subject silhouette, pose direction, object placement, scale relationships, and negative space as the layout guide. Do not copy viewport guide lines, grid lines, blue material, or primitive geometry as final image details.`;
+  }
+
+  return `Reference image label: ${cleanLabel}`;
 }
 
 function safePathSegment(value) {
@@ -2327,7 +2431,28 @@ function errorStatusCode(error) {
   return Number.isInteger(status) && status >= 400 && status <= 599 ? status : 500;
 }
 
+function sendApiError(res, error, fallback) {
+  const status = errorStatusCode(error);
+  let message = fallback;
+  try {
+    message = publicErrorMessage(error, fallback) || fallback;
+  } catch (formatError) {
+    console.error("Failed to format API error.", formatError);
+    message = error?.message || fallback;
+  }
+
+  if (!res.headersSent) {
+    res.status(status).json({
+      error: message,
+      status
+    });
+  }
+}
+
 function publicErrorMessage(error, fallback) {
+  const validationMessage = validationErrorMessage(error);
+  if (validationMessage) return validationMessage;
+
   const candidates = [
     error?.message,
     error?.body?.detail,
@@ -2351,11 +2476,31 @@ function publicErrorMessage(error, fallback) {
   return fallback;
 }
 
+function validationErrorMessage(error) {
+  const status = errorStatusCode(error);
+  if (status !== 422 && error?.name !== "ValidationError") return "";
+  return publicErrorDetail(safeValidationFieldErrors(error) || error?.body?.detail || error?.data?.detail || error?.response?.data?.detail);
+}
+
+function safeValidationFieldErrors(error) {
+  try {
+    return error?.fieldErrors;
+  } catch {
+    return null;
+  }
+}
+
 function publicErrorDetail(value) {
   if (!value) return "";
   if (typeof value === "string") return value.trim();
   if (Array.isArray(value)) return value.map(publicErrorDetail).filter(Boolean).join(" ");
   if (typeof value === "object") {
+    if (value.msg || value.message) {
+      const location = Array.isArray(value.loc) ? value.loc.filter((item) => item !== "body").join(".") : "";
+      const message = publicErrorDetail(value.msg || value.message);
+      return location ? `${location}: ${message}` : message;
+    }
+
     const direct = publicErrorDetail(value.msg || value.message || value.detail || value.error);
     if (direct) return direct;
 
@@ -2367,6 +2512,11 @@ function publicErrorDetail(value) {
   }
 
   return String(value).trim();
+}
+
+function normalizeVoidVideoFrameCount(value) {
+  const numeric = optionalInteger(value) ?? 85;
+  return voidVideoFrameOptions.reduce((nearest, option) => (Math.abs(option - numeric) < Math.abs(nearest - numeric) ? option : nearest), 85);
 }
 
 function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind }) {
