@@ -9,6 +9,8 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { existsSync } from "node:fs";
 import { File } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
 import { fal } from "@fal-ai/client";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,6 +24,7 @@ const dataDir = path.join(__dirname, "data");
 const historyPath = path.join(dataDir, "history.json");
 const nodeProjectsPath = path.join(dataDir, "node-projects.json");
 let historyWriteQueue = Promise.resolve();
+const execFile = promisify(execFileCallback);
 const port = Number(process.env.PORT || 3333);
 const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_PER_SECOND || 0.3034);
 const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.2419);
@@ -44,6 +47,16 @@ const sam3ImageCostPerRequest = 0.005;
 const sam3VideoCostPer16Frames = 0.005;
 const aurora480pCostPerSecond = 0.07;
 const aurora720pCostPerSecond = 0.14;
+const bytedanceUpscalerCostPerSecond = {
+  "1080p": 0.0072,
+  "2k": 0.0144,
+  "4k": 0.0288
+};
+const topazUpscalerCostPerSecond = {
+  "up-to-720p": 0.01,
+  "720p-1080p": 0.02,
+  "above-1080p": 0.08
+};
 const dwposeCostPerComputeSecond = 0.0006;
 const patinaBaseCost = 0.01;
 const patinaMapCostPerMegapixel = 0.01;
@@ -59,6 +72,33 @@ const sam3SegmentationModelsEnabled = false; // Flip back to true when revisitin
 const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
 const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
 const voidVideoFrameOptions = [69, 77, 85, 93, 101, 109, 117, 125, 133, 141, 149, 157, 165, 173, 181, 189, 197];
+const bytedanceUpscalerResolutionOptions = ["1080p", "2k", "4k"];
+const bytedanceUpscalerFpsOptions = ["30fps", "60fps"];
+const bytedanceUpscalerPresetOptions = ["general", "ugc", "short_series", "aigc", "old_film"];
+const bytedanceUpscalerTierOptions = ["fast", "standard", "pro"];
+const bytedanceUpscalerFidelityOptions = ["high", "medium"];
+const topazUpscalerModelOptions = [
+  "Proteus",
+  "Artemis HQ",
+  "Artemis MQ",
+  "Artemis LQ",
+  "Nyx",
+  "Nyx Fast",
+  "Nyx XL",
+  "Nyx HF",
+  "Gaia HQ",
+  "Gaia CG",
+  "Gaia 2",
+  "Starlight Precise 1",
+  "Starlight Precise 2",
+  "Starlight Precise 2.5",
+  "Starlight HQ",
+  "Starlight Mini",
+  "Starlight Sharp",
+  "Starlight Fast 1",
+  "Starlight Fast 2"
+];
+const topazUpscalerBillingTierOptions = ["auto", "up-to-720p", "720p-1080p", "above-1080p"];
 const composerPoseFieldKeys = [
   "leftUpperArm",
   "leftUpperArmX",
@@ -226,6 +266,22 @@ app.get("/api/stats", async (_req, res) => {
         aurora: {
           costPerSecond480p: aurora480pCostPerSecond,
           costPerSecond720p: aurora720pCostPerSecond,
+          currency: "USD"
+        },
+        bytedanceUpscaler: {
+          costPerSecond1080p: bytedanceUpscalerCostPerSecond["1080p"],
+          costPerSecond2K: bytedanceUpscalerCostPerSecond["2k"],
+          costPerSecond4K: bytedanceUpscalerCostPerSecond["4k"],
+          proMultiplier: 10,
+          fps60Multiplier: 2,
+          currency: "USD"
+        },
+        topazUpscaler: {
+          costPerSecondUpTo720p: topazUpscalerCostPerSecond["up-to-720p"],
+          costPerSecond720pTo1080p: topazUpscalerCostPerSecond["720p-1080p"],
+          costPerSecondAbove1080p: topazUpscalerCostPerSecond["above-1080p"],
+          fps60Multiplier: 2,
+          gaia2Multiplier: 0.5,
           currency: "USD"
         },
         dwpose: {
@@ -1284,6 +1340,20 @@ app.post("/api/node/utility-video", async (req, res) => {
       });
     }
 
+    if (selectedVideoModel.provider === "fal-bytedance-video-upscaler") {
+      return runBytedanceVideoUpscaler(req, res, {
+        referenceVideoUrls,
+        selectedVideoModel
+      });
+    }
+
+    if (selectedVideoModel.provider === "fal-topaz-video-upscaler") {
+      return runTopazVideoUpscaler(req, res, {
+        referenceVideoUrls,
+        selectedVideoModel
+      });
+    }
+
     if (selectedVideoModel.provider === "fal-wan-fun-control") {
       return runWanFunControlVideo(req, res, {
         prompt,
@@ -2115,6 +2185,174 @@ async function runRifeVideoInterpolation(req, res, { referenceVideoUrls, selecte
   });
 }
 
+async function runBytedanceVideoUpscaler(req, res, { referenceVideoUrls, selectedVideoModel }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "Bytedance Video Upscaler requires a connected video." });
+  }
+
+  const endpoint = selectedVideoModel.id;
+  const options = req.body.bytedanceVideoUpscaler || {};
+  const scaleRatio = optionalNumber(options.scaleRatio);
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    target_resolution: normalizeChoice(options.targetResolution, bytedanceUpscalerResolutionOptions, "1080p"),
+    target_fps: normalizeChoice(options.targetFps, bytedanceUpscalerFpsOptions, "30fps"),
+    enhancement_preset: normalizeChoice(options.enhancementPreset, bytedanceUpscalerPresetOptions, "general"),
+    enhancement_tier: normalizeChoice(options.enhancementTier, bytedanceUpscalerTierOptions, "standard"),
+    fidelity: normalizeChoice(options.fidelity, bytedanceUpscalerFidelityOptions, "high")
+  };
+  if (scaleRatio !== undefined) input.scale_ratio = Math.min(10, Math.max(1.1, scaleRatio));
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no Bytedance upscaled video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "bytedance-video-upscaler");
+  const outputVideo = enrichVideoMetadata(remoteVideo, await probeVideoFile(output.filePath));
+  const cost = estimateBytedanceVideoUpscalerCost({
+    endpoint,
+    targetResolution: input.target_resolution,
+    targetFps: input.target_fps,
+    enhancementTier: input.enhancement_tier,
+    duration: result?.data?.duration ?? outputVideo.duration
+  });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: selectedVideoModel.displayName,
+    endpoint,
+    mode: "Bytedance video upscale",
+    prompt: bytedanceUpscalerPromptLabel(input),
+    submittedPrompt: "",
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: selectedVideoModel.displayName,
+      targetResolution: input.target_resolution,
+      targetFps: input.target_fps,
+      enhancementPreset: input.enhancement_preset,
+      enhancementTier: input.enhancement_tier,
+      fidelity: input.fidelity,
+      scaleRatio: input.scale_ratio || null,
+      durationSeconds: cost.durationSeconds || null,
+      sourceVideoCount: 1
+    },
+    cost,
+    remoteVideo: outputVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedVideoModel.displayName,
+    cost,
+    video: {
+      ...outputVideo,
+      label: selectedVideoModel.displayName,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
+
+async function runTopazVideoUpscaler(req, res, { referenceVideoUrls, selectedVideoModel }) {
+  const videoUrl = firstLocalOutput(referenceVideoUrls);
+  if (!videoUrl) {
+    return res.status(400).json({ error: "Topaz Video Upscale requires a connected video." });
+  }
+
+  const endpoint = selectedVideoModel.id;
+  const options = req.body.topazVideoUpscaler || {};
+  const targetFps = optionalInteger(options.targetFps);
+  const input = {
+    video_url: await uploadLocalOutputToFal(videoUrl),
+    model: normalizeChoice(options.model, topazUpscalerModelOptions, "Proteus"),
+    upscale_factor: clampNumber(options.upscaleFactor, 1, 8, 2),
+    H264_output: Boolean(options.h264Output)
+  };
+  if (targetFps !== undefined) input.target_fps = Math.min(120, Math.max(16, targetFps));
+  addOptionalRangeInput(input, "compression", options.compression, 0, 1);
+  addOptionalRangeInput(input, "noise", options.noise, 0, 1);
+  addOptionalRangeInput(input, "halo", options.halo, 0, 1);
+  addOptionalRangeInput(input, "grain", options.grain, 0, 0.1);
+  addOptionalRangeInput(input, "recover_detail", options.recoverDetail, 0, 1);
+
+  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const remoteVideo = normalizeFalFile(result?.data?.video);
+
+  if (!remoteVideo?.url) {
+    return res.status(502).json({ error: "Fal returned no Topaz upscaled video URL.", raw: result?.data });
+  }
+
+  const output = await downloadVideo(remoteVideo.url, "topaz-video-upscale");
+  const outputVideo = enrichVideoMetadata(remoteVideo, await probeVideoFile(output.filePath));
+  const billingTier = normalizeChoice(options.billingResolutionTier, topazUpscalerBillingTierOptions, "auto");
+  const cost = estimateTopazVideoUpscalerCost({
+    endpoint,
+    model: input.model,
+    targetFps: input.target_fps,
+    billingResolutionTier: billingTier,
+    remoteVideo: outputVideo,
+    duration: result?.data?.duration ?? outputVideo.duration
+  });
+
+  await appendHistory({
+    id: result.requestId || randomUUID(),
+    createdAt: new Date().toISOString(),
+    mediaType: "video",
+    provider: "fal.ai",
+    modelName: selectedVideoModel.displayName,
+    endpoint,
+    mode: "Topaz video upscale",
+    prompt: topazUpscalerPromptLabel(input, billingTier),
+    submittedPrompt: "",
+    project: projectFromBody(req.body),
+    node: nodeFromBody(req.body),
+    settings: {
+      model: input.model,
+      upscaleFactor: input.upscale_factor,
+      targetFps: input.target_fps || "source",
+      h264Output: input.H264_output,
+      billingResolutionTier: cost.billingResolutionTier || billingTier,
+      compression: input.compression ?? null,
+      noise: input.noise ?? null,
+      halo: input.halo ?? null,
+      grain: input.grain ?? null,
+      recoverDetail: input.recover_detail ?? null,
+      durationSeconds: cost.durationSeconds || null,
+      sourceVideoCount: 1
+    },
+    cost,
+    remoteVideo: outputVideo,
+    localVideo: output.publicPath,
+    outputFileName: output.fileName,
+    outputBytes: output.bytes
+  });
+
+  return res.json({
+    requestId: result.requestId,
+    endpoint,
+    modelName: selectedVideoModel.displayName,
+    cost,
+    video: {
+      ...outputVideo,
+      label: selectedVideoModel.displayName,
+      localUrl: output.publicPath,
+      fileName: output.fileName
+    }
+  });
+}
+
 app.post(
   "/api/generate",
   upload.fields([
@@ -2515,8 +2753,53 @@ async function downloadVideo(url, kind) {
   return {
     fileName,
     publicPath: `/outputs/${fileName}`,
+    filePath: outputPath,
     bytes: bytes.length
   };
+}
+
+async function probeVideoFile(filePath) {
+  if (!filePath) return {};
+
+  try {
+    const { stdout } = await execFile(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate,r_frame_rate,duration,nb_frames:format=duration",
+        "-of",
+        "json",
+        filePath
+      ],
+      { windowsHide: true, timeout: 10000 }
+    );
+    const data = JSON.parse(stdout || "{}");
+    const stream = Array.isArray(data.streams) ? data.streams[0] || {} : {};
+    const metadata = {
+      width: positiveNumber(stream.width),
+      height: positiveNumber(stream.height),
+      duration: positiveNumber(stream.duration) || positiveNumber(data.format?.duration),
+      fps: frameRateFromRatio(stream.avg_frame_rate || stream.r_frame_rate),
+      num_frames: positiveNumber(stream.nb_frames)
+    };
+    return Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== null));
+  } catch {
+    return {};
+  }
+}
+
+function enrichVideoMetadata(video, metadata = {}) {
+  const next = { ...(video || {}) };
+  for (const [key, value] of Object.entries(metadata)) {
+    if (value !== null && value !== undefined && (next[key] === undefined || next[key] === null || next[key] === "")) {
+      next[key] = value;
+    }
+  }
+  return next;
 }
 
 async function downloadImage(url, kind, mimeTypeHint = "") {
@@ -2942,6 +3225,76 @@ function estimateFalVideoUtilityCost({ endpoint, pricingBasis, amountUsd = null,
   };
 }
 
+function estimateBytedanceVideoUpscalerCost({ endpoint, targetResolution, targetFps, enhancementTier, duration }) {
+  const resolution = normalizeChoice(targetResolution, bytedanceUpscalerResolutionOptions, "1080p");
+  const seconds = positiveNumber(duration);
+  const baseRate = bytedanceUpscalerCostPerSecond[resolution] || bytedanceUpscalerCostPerSecond["1080p"];
+  const fpsMultiplier = targetFps === "60fps" ? 2 : 1;
+  const tierMultiplier = enhancementTier === "pro" ? 10 : 1;
+  const unitRateUsd = baseRate * fpsMultiplier * tierMultiplier;
+
+  return {
+    amountUsd: seconds ? roundCurrency(seconds * unitRateUsd) : null,
+    currency: "USD",
+    unitRateUsd,
+    units: seconds,
+    unit: "video second",
+    mediaType: "video",
+    targetResolution: resolution,
+    targetFps,
+    enhancementTier,
+    durationSeconds: seconds,
+    pricingBasis: seconds
+      ? "Bytedance Video Upscaler fal.ai per-second estimate by output resolution, FPS, and tier"
+      : "Bytedance Video Upscaler fal.ai per-second estimate; duration unavailable",
+    pricingSource: "fal-model-page-2026-05-18",
+    endpoint
+  };
+}
+
+function estimateTopazVideoUpscalerCost({ endpoint, model, targetFps, billingResolutionTier, remoteVideo, duration }) {
+  const resolvedTier = resolveTopazBillingTier(billingResolutionTier, remoteVideo);
+  const seconds = positiveNumber(duration || remoteVideo?.duration);
+  const baseRate = topazUpscalerCostPerSecond[resolvedTier] || topazUpscalerCostPerSecond["above-1080p"];
+  const fpsMultiplier = Number(targetFps || 0) >= 60 ? 2 : 1;
+  const modelMultiplier = model === "Gaia 2" ? 0.5 : 1;
+  const unitRateUsd = baseRate * fpsMultiplier * modelMultiplier;
+
+  return {
+    amountUsd: seconds ? roundCurrency(seconds * unitRateUsd) : null,
+    currency: "USD",
+    unitRateUsd,
+    units: seconds,
+    unit: "video second",
+    mediaType: "video",
+    billingResolutionTier: resolvedTier,
+    model,
+    targetFps: targetFps || null,
+    durationSeconds: seconds,
+    pricingBasis: seconds
+      ? "Topaz Video Upscale fal.ai per-second estimate by output resolution tier and FPS"
+      : "Topaz Video Upscale fal.ai per-second estimate; duration unavailable",
+    pricingSource: "fal-model-page-2026-05-18",
+    endpoint
+  };
+}
+
+function resolveTopazBillingTier(billingResolutionTier, remoteVideo) {
+  const configuredTier = normalizeChoice(billingResolutionTier, topazUpscalerBillingTierOptions, "auto");
+  if (configuredTier !== "auto") return configuredTier;
+
+  const width = Number(remoteVideo?.width || remoteVideo?.metadata?.width || 0);
+  const height = Number(remoteVideo?.height || remoteVideo?.metadata?.height || 0);
+  const longSide = Math.max(width, height);
+  const shortSide = Math.min(width, height);
+  if (longSide > 0 && shortSide > 0) {
+    if (longSide <= 1280 && shortSide <= 720) return "up-to-720p";
+    if (longSide <= 1920 && shortSide <= 1080) return "720p-1080p";
+  }
+
+  return "above-1080p";
+}
+
 function estimatePatinaCost({ endpoint, maps, image }) {
   const width = Number(image?.width || 0);
   const height = Number(image?.height || 0);
@@ -3131,6 +3484,18 @@ function durationToSeconds(duration) {
   if (duration === "auto") return 15;
   const match = String(duration || "15").match(/\d+/);
   return Math.max(1, Number(match?.[0] || 15));
+}
+
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function frameRateFromRatio(value) {
+  const [numerator, denominator = "1"] = String(value || "").split("/").map(Number);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) return null;
+  const fps = numerator / denominator;
+  return Number.isFinite(fps) && fps > 0 ? Math.round(fps * 1000) / 1000 : null;
 }
 
 function roundCurrency(value) {
@@ -3492,6 +3857,24 @@ function resolveUtilityVideoModel(model) {
     };
   }
 
+  if (normalized.includes("bytedance") && normalized.includes("upscal")) {
+    return {
+      provider: "fal-bytedance-video-upscaler",
+      displayName: "Bytedance Video Upscaler",
+      id: "fal-ai/bytedance-upscaler/upscale/video",
+      requiresPrompt: false
+    };
+  }
+
+  if (normalized.includes("topaz") || (normalized.includes("video") && normalized.includes("upscale"))) {
+    return {
+      provider: "fal-topaz-video-upscaler",
+      displayName: "Topaz Video Upscale",
+      id: "fal-ai/topaz/upscale/video",
+      requiresPrompt: false
+    };
+  }
+
   if (normalized.includes("void") || normalized.includes("inpaint")) {
     return {
       provider: "fal-void-video-inpainting",
@@ -3826,6 +4209,33 @@ function qwenCameraPromptLabel(input) {
     .join(", ");
 }
 
+function bytedanceUpscalerPromptLabel(input) {
+  return [
+    "Bytedance video upscale",
+    input.target_resolution,
+    input.target_fps,
+    input.enhancement_preset,
+    input.enhancement_tier,
+    input.fidelity,
+    input.scale_ratio ? `${input.scale_ratio}x scale` : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function topazUpscalerPromptLabel(input, billingTier) {
+  return [
+    "Topaz video upscale",
+    input.model,
+    `${input.upscale_factor}x`,
+    input.target_fps ? `${input.target_fps}fps` : "source fps",
+    input.H264_output ? "H264" : "H265/default",
+    billingTier && billingTier !== "auto" ? `billing ${billingTier}` : "auto billing tier"
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
 function clampInteger(value, min, max, fallback) {
   const number = Math.round(Number(value));
   if (!Number.isFinite(number)) return fallback;
@@ -3838,10 +4248,22 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, number));
 }
 
+function optionalNumber(value) {
+  if (value === "" || value === null || value === undefined) return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
 function optionalInteger(value) {
   if (value === "" || value === null || value === undefined) return undefined;
   const number = Math.round(Number(value));
   return Number.isFinite(number) ? number : undefined;
+}
+
+function addOptionalRangeInput(target, key, value, min, max) {
+  const number = optionalNumber(value);
+  if (number === undefined) return;
+  target[key] = Math.min(max, Math.max(min, number));
 }
 
 function normalizePatinaMaps(value) {

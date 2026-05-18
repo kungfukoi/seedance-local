@@ -49,6 +49,20 @@ const defaultPricing = {
       costPerSecond480p: 0.07,
       costPerSecond720p: 0.14
     },
+    bytedanceUpscaler: {
+      costPerSecond1080p: 0.0072,
+      costPerSecond2K: 0.0144,
+      costPerSecond4K: 0.0288,
+      proMultiplier: 10,
+      fps60Multiplier: 2
+    },
+    topazUpscaler: {
+      costPerSecondUpTo720p: 0.01,
+      costPerSecond720pTo1080p: 0.02,
+      costPerSecondAbove1080p: 0.08,
+      fps60Multiplier: 2,
+      gaia2Multiplier: 0.5
+    },
     dwpose: {
       costPerComputeSecond: 0.0006
     },
@@ -503,6 +517,14 @@ function estimateItemCost(item, mediaType, pricing) {
     return estimateAuroraStatsCost(item, settings, pricing);
   }
 
+  if (modelKey.includes("bytedance") && modelKey.includes("upscal")) {
+    return estimateBytedanceUpscalerStatsCost(item, settings, pricing);
+  }
+
+  if (modelKey.includes("topaz")) {
+    return estimateTopazUpscalerStatsCost(item, settings, pricing);
+  }
+
   if (modelKey.includes("sam 3") || modelKey.includes("sam-3")) {
     return estimateSam3VideoStatsCost(item, settings, pricing);
   }
@@ -632,6 +654,52 @@ function estimateAuroraStatsCost(item, settings, pricing) {
   if (!Number.isFinite(duration) || duration <= 0) return null;
   const rate = settings.resolution === "480p" ? utilityPricing.costPerSecond480p : utilityPricing.costPerSecond720p;
   return Math.ceil(duration) * rate;
+}
+
+function estimateBytedanceUpscalerStatsCost(item, settings, pricing) {
+  const utilityPricing = pricing.utility?.bytedanceUpscaler || defaultPricing.utility.bytedanceUpscaler;
+  const duration = Number(item.remoteVideo?.duration || settings.durationSeconds || item.cost?.durationSeconds || item.cost?.units || 0);
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  const resolution = String(settings.targetResolution || item.cost?.targetResolution || "1080p").toLowerCase();
+  const baseRate =
+    resolution === "4k"
+      ? utilityPricing.costPerSecond4K
+      : resolution === "2k"
+        ? utilityPricing.costPerSecond2K
+        : utilityPricing.costPerSecond1080p;
+  const fpsMultiplier = String(settings.targetFps || item.cost?.targetFps || "30fps") === "60fps" ? utilityPricing.fps60Multiplier : 1;
+  const tierMultiplier = String(settings.enhancementTier || item.cost?.enhancementTier || "standard") === "pro" ? utilityPricing.proMultiplier : 1;
+  return duration * baseRate * fpsMultiplier * tierMultiplier;
+}
+
+function estimateTopazUpscalerStatsCost(item, settings, pricing) {
+  const utilityPricing = pricing.utility?.topazUpscaler || defaultPricing.utility.topazUpscaler;
+  const duration = Number(item.remoteVideo?.duration || settings.durationSeconds || item.cost?.durationSeconds || item.cost?.units || 0);
+  if (!Number.isFinite(duration) || duration <= 0) return null;
+  const tier = resolveTopazStatsBillingTier(settings.billingResolutionTier || item.cost?.billingResolutionTier, item.remoteVideo);
+  const baseRate =
+    tier === "up-to-720p"
+      ? utilityPricing.costPerSecondUpTo720p
+      : tier === "720p-1080p"
+        ? utilityPricing.costPerSecond720pTo1080p
+        : utilityPricing.costPerSecondAbove1080p;
+  const fpsMultiplier = Number(settings.targetFps || item.cost?.targetFps || 0) >= 60 ? utilityPricing.fps60Multiplier : 1;
+  const modelMultiplier = String(settings.model || item.cost?.model || "").toLowerCase() === "gaia 2" ? utilityPricing.gaia2Multiplier : 1;
+  return duration * baseRate * fpsMultiplier * modelMultiplier;
+}
+
+function resolveTopazStatsBillingTier(value, remoteVideo) {
+  const configured = String(value || "auto");
+  if (["up-to-720p", "720p-1080p", "above-1080p"].includes(configured)) return configured;
+  const width = Number(remoteVideo?.width || remoteVideo?.metadata?.width || 0);
+  const height = Number(remoteVideo?.height || remoteVideo?.metadata?.height || 0);
+  const longSide = Math.max(width, height);
+  const shortSide = Math.min(width, height);
+  if (longSide > 0 && shortSide > 0) {
+    if (longSide <= 1280 && shortSide <= 720) return "up-to-720p";
+    if (longSide <= 1920 && shortSide <= 1080) return "720p-1080p";
+  }
+  return "above-1080p";
 }
 
 function estimateSam3VideoStatsCost(item, settings, pricing) {

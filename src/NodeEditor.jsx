@@ -407,10 +407,45 @@ const utilityVideoModelNames = {
   sam3Video: "SAM 3 Video",
   voidVideoInpainting: "VOID Video Inpainting",
   birefnetVideo: "BiRefNet Video",
-  rifeVideo: "RIFE Video"
+  rifeVideo: "RIFE Video",
+  bytedanceUpscaler: "Bytedance Video Upscaler",
+  topazUpscaler: "Topaz Video Upscale"
 };
 const birefnetModelOptions = ["General Use (Light)", "General Use (Light 2K)", "General Use (Heavy)", "Matting", "Portrait", "General Use (Dynamic)"];
 const birefnetResolutionOptions = ["1024x1024", "2048x2048", "2304x2304"];
+const bytedanceUpscalerResolutionOptions = ["1080p", "2k", "4k"];
+const bytedanceUpscalerFpsOptions = ["30fps", "60fps"];
+const bytedanceUpscalerPresetOptions = ["general", "ugc", "short_series", "aigc", "old_film"];
+const bytedanceUpscalerTierOptions = ["fast", "standard", "pro"];
+const bytedanceUpscalerFidelityOptions = ["high", "medium"];
+const topazUpscalerModelOptions = [
+  "Proteus",
+  "Artemis HQ",
+  "Artemis MQ",
+  "Artemis LQ",
+  "Nyx",
+  "Nyx Fast",
+  "Nyx XL",
+  "Nyx HF",
+  "Gaia HQ",
+  "Gaia CG",
+  "Gaia 2",
+  "Starlight Precise 1",
+  "Starlight Precise 2",
+  "Starlight Precise 2.5",
+  "Starlight HQ",
+  "Starlight Mini",
+  "Starlight Sharp",
+  "Starlight Fast 1",
+  "Starlight Fast 2"
+];
+const topazUpscalerFpsOptions = ["source", "30", "60"];
+const topazUpscalerBillingTierOptions = [
+  ["auto", "Auto"],
+  ["up-to-720p", "Up to 720p"],
+  ["720p-1080p", "720p to 1080p"],
+  ["above-1080p", "Above 1080p"]
+];
 const utilityModelDescriptions = {
   [utilityImageModelNames.dwpose]: "Creates pose/control maps from a source image for character and body-guided generation.",
   [utilityImageModelNames.depthAnything]: "Extracts a depth map from an image for depth-aware control and composition.",
@@ -421,7 +456,9 @@ const utilityModelDescriptions = {
   [utilityVideoModelNames.sam3Video]: "Segments prompted objects through a video and returns a mask video.",
   [utilityVideoModelNames.voidVideoInpainting]: "Removes an object from a video and inpaints the affected background over time.",
   [utilityVideoModelNames.birefnetVideo]: "Removes a video background with BiRefNet and can optionally return the mask video.",
-  [utilityVideoModelNames.rifeVideo]: "Interpolates in-between frames with RIFE optical-flow style motion estimation to smooth low-FPS video."
+  [utilityVideoModelNames.rifeVideo]: "Interpolates in-between frames with RIFE optical-flow style motion estimation to smooth low-FPS video.",
+  [utilityVideoModelNames.bytedanceUpscaler]: "Upscales video with Bytedance's Fal upscaler using resolution, FPS, preset, tier, and fidelity controls.",
+  [utilityVideoModelNames.topazUpscaler]: "Upscales and enhances video with Topaz Video AI models, with optional interpolation and billing-tier tracking."
 };
 const sam3SegmentationModelsEnabled = false; // Flip back to true when revisiting SAM 3 segmentation.
 
@@ -4264,6 +4301,9 @@ function NodeBody({
     const isVoidVideo = isUtilityVoidVideoModel(utilityVideoModel);
     const isBirefnetVideo = isUtilityBirefnetVideoModel(utilityVideoModel);
     const isRifeVideo = isUtilityRifeVideoModel(utilityVideoModel);
+    const isBytedanceUpscaler = isUtilityBytedanceUpscalerModel(utilityVideoModel);
+    const isTopazUpscaler = isUtilityTopazUpscalerModel(utilityVideoModel);
+    const isVideoUpscaler = isUtilityVideoUpscalerModel(utilityVideoModel);
     const utilityOutputPort = {
       ...config.output[0],
       label: isVideoMode ? "Video output" : "Image output",
@@ -4280,7 +4320,7 @@ function NodeBody({
           .filter(Boolean);
     const resultType = node.data.resultType || mode;
     const canRun = isVideoMode
-      ? Boolean(incoming.referenceVideoIn?.length) && (isBirefnetVideo || isRifeVideo || Boolean(promptValue.trim()))
+      ? Boolean(incoming.referenceVideoIn?.length) && (isBirefnetVideo || isRifeVideo || isVideoUpscaler || Boolean(promptValue.trim()))
       : Boolean(incoming.imageIn?.length) && (!isSam3Image || Boolean(promptValue.trim()));
     const utilityRunLabel = isVideoMode
       ? isSam3Video
@@ -4291,7 +4331,11 @@ function NodeBody({
             ? "Run BiRefNet Video"
             : isRifeVideo
               ? "Run RIFE"
-              : "Run Wan Fun Control"
+              : isBytedanceUpscaler
+                ? "Run Bytedance Upscale"
+                : isTopazUpscaler
+                  ? "Run Topaz Upscale"
+                  : "Run Wan Fun Control"
       : isSam3Image
         ? "Run SAM 3 Image"
         : isBirefnetImage
@@ -4373,15 +4417,17 @@ function NodeBody({
                   <option>{utilityVideoModelNames.voidVideoInpainting}</option>
                   <option>{utilityVideoModelNames.birefnetVideo}</option>
                   <option>{utilityVideoModelNames.rifeVideo}</option>
+                  <option>{utilityVideoModelNames.bytedanceUpscaler}</option>
+                  <option>{utilityVideoModelNames.topazUpscaler}</option>
                   <option>{utilityVideoModelNames.sam3Video}</option>
                 </select>
               </NodeRow>
-              {!isBirefnetVideo && !isRifeVideo && (
+              {!isBirefnetVideo && !isRifeVideo && !isVideoUpscaler && (
                 <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
                   <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
                 </NodeRow>
               )}
-              {!isSam3Video && !isBirefnetVideo && !isRifeVideo && (
+              {!isSam3Video && !isBirefnetVideo && !isRifeVideo && !isVideoUpscaler && (
                 <NodeRow label="Generations">
                   <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
                     {batchOptions.map((option) => (
@@ -4392,7 +4438,7 @@ function NodeBody({
                   </select>
                 </NodeRow>
               )}
-              <NodeRow label={isSam3Video || isBirefnetVideo || isRifeVideo ? "Video" : isVoidVideo ? "Source Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <NodeRow label={isSam3Video || isBirefnetVideo || isRifeVideo || isVideoUpscaler ? "Video" : isVoidVideo ? "Source Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
                 <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add video")}</button>
               </NodeRow>
               {isSam3Video ? (
@@ -4466,6 +4512,102 @@ function NodeBody({
                     <button className={`node-toggle ${node.data.rifeLoop ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { rifeLoop: !node.data.rifeLoop })}>
                       <span />
                     </button>
+                  </NodeRow>
+                </>
+              ) : isBytedanceUpscaler ? (
+                <>
+                  <NodeRow label="Resolution">
+                    <select value={node.data.bytedanceUpscalerTargetResolution || "1080p"} onChange={(event) => onUpdate(node.id, { bytedanceUpscalerTargetResolution: event.target.value })}>
+                      {bytedanceUpscalerResolutionOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option === "2k" ? "2K" : option === "4k" ? "4K" : "1080p"}
+                        </option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="FPS">
+                    <select value={node.data.bytedanceUpscalerTargetFps || "30fps"} onChange={(event) => onUpdate(node.id, { bytedanceUpscalerTargetFps: event.target.value })}>
+                      {bytedanceUpscalerFpsOptions.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Preset">
+                    <select value={node.data.bytedanceUpscalerPreset || "general"} onChange={(event) => onUpdate(node.id, { bytedanceUpscalerPreset: event.target.value })}>
+                      {bytedanceUpscalerPresetOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option.replace(/_/g, " ")}
+                        </option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Tier">
+                    <select value={node.data.bytedanceUpscalerTier || "standard"} onChange={(event) => onUpdate(node.id, { bytedanceUpscalerTier: event.target.value })}>
+                      {bytedanceUpscalerTierOptions.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Fidelity">
+                    <select value={node.data.bytedanceUpscalerFidelity || "high"} onChange={(event) => onUpdate(node.id, { bytedanceUpscalerFidelity: event.target.value })}>
+                      {bytedanceUpscalerFidelityOptions.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Scale Ratio">
+                    <input type="number" min="1.1" max="10" step="0.1" value={node.data.bytedanceUpscalerScaleRatio || ""} onChange={(event) => onUpdate(node.id, { bytedanceUpscalerScaleRatio: event.target.value })} placeholder="Auto" />
+                  </NodeRow>
+                </>
+              ) : isTopazUpscaler ? (
+                <>
+                  <NodeRow label="Topaz Model">
+                    <select value={node.data.topazUpscalerModel || "Proteus"} onChange={(event) => onUpdate(node.id, { topazUpscalerModel: event.target.value })}>
+                      {topazUpscalerModelOptions.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Upscale">
+                    <input type="number" min="1" max="8" step="0.25" value={node.data.topazUpscalerFactor || 2} onChange={(event) => onUpdate(node.id, { topazUpscalerFactor: event.target.value })} />
+                  </NodeRow>
+                  <NodeRow label="Target FPS">
+                    <select value={node.data.topazUpscalerTargetFps || "source"} onChange={(event) => onUpdate(node.id, { topazUpscalerTargetFps: event.target.value })}>
+                      {topazUpscalerFpsOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option === "source" ? "Source" : option}
+                        </option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="Billing Tier">
+                    <select value={node.data.topazUpscalerBillingTier || "auto"} onChange={(event) => onUpdate(node.id, { topazUpscalerBillingTier: event.target.value })}>
+                      {topazUpscalerBillingTierOptions.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </NodeRow>
+                  <NodeRow label="H264">
+                    <button className={`node-toggle ${node.data.topazUpscalerH264Output ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { topazUpscalerH264Output: !node.data.topazUpscalerH264Output })}>
+                      <span />
+                    </button>
+                  </NodeRow>
+                  <NodeRow label="Compression">
+                    <input type="number" min="0" max="1" step="0.05" value={node.data.topazUpscalerCompression ?? ""} onChange={(event) => onUpdate(node.id, { topazUpscalerCompression: event.target.value })} placeholder="Auto" />
+                  </NodeRow>
+                  <NodeRow label="Noise">
+                    <input type="number" min="0" max="1" step="0.05" value={node.data.topazUpscalerNoise ?? ""} onChange={(event) => onUpdate(node.id, { topazUpscalerNoise: event.target.value })} placeholder="Auto" />
+                  </NodeRow>
+                  <NodeRow label="Halo">
+                    <input type="number" min="0" max="1" step="0.05" value={node.data.topazUpscalerHalo ?? ""} onChange={(event) => onUpdate(node.id, { topazUpscalerHalo: event.target.value })} placeholder="Auto" />
+                  </NodeRow>
+                  <NodeRow label="Grain">
+                    <input type="number" min="0" max="0.1" step="0.01" value={node.data.topazUpscalerGrain ?? ""} onChange={(event) => onUpdate(node.id, { topazUpscalerGrain: event.target.value })} placeholder="Auto" />
+                  </NodeRow>
+                  <NodeRow label="Detail">
+                    <input type="number" min="0" max="1" step="0.05" value={node.data.topazUpscalerRecoverDetail ?? ""} onChange={(event) => onUpdate(node.id, { topazUpscalerRecoverDetail: event.target.value })} placeholder="Auto" />
                   </NodeRow>
                 </>
               ) : isBirefnetVideo ? (
@@ -5240,6 +5382,22 @@ function createDefaultNodeData(type, label, count) {
       rifeUseCalculatedFps: true,
       rifeFps: 24,
       rifeLoop: false,
+      bytedanceUpscalerTargetResolution: "1080p",
+      bytedanceUpscalerTargetFps: "30fps",
+      bytedanceUpscalerPreset: "general",
+      bytedanceUpscalerTier: "standard",
+      bytedanceUpscalerFidelity: "high",
+      bytedanceUpscalerScaleRatio: "",
+      topazUpscalerModel: "Proteus",
+      topazUpscalerFactor: 2,
+      topazUpscalerTargetFps: "source",
+      topazUpscalerBillingTier: "auto",
+      topazUpscalerH264Output: false,
+      topazUpscalerCompression: "",
+      topazUpscalerNoise: "",
+      topazUpscalerHalo: "",
+      topazUpscalerGrain: "",
+      topazUpscalerRecoverDetail: "",
       numInferenceSteps: 27,
       guidanceScale: 6,
       shift: 5,
@@ -5357,6 +5515,19 @@ function isUtilityRifeVideoModel(model) {
   return String(model || "").toLowerCase().includes("rife");
 }
 
+function isUtilityBytedanceUpscalerModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("bytedance") && normalized.includes("upscal");
+}
+
+function isUtilityTopazUpscalerModel(model) {
+  return String(model || "").toLowerCase().includes("topaz");
+}
+
+function isUtilityVideoUpscalerModel(model) {
+  return isUtilityBytedanceUpscalerModel(model) || isUtilityTopazUpscalerModel(model);
+}
+
 function isUtilityVoidVideoModel(model) {
   const normalized = String(model || "").toLowerCase();
   return normalized.includes("void") || normalized.includes("inpaint");
@@ -5381,6 +5552,7 @@ function utilityInputPortIds(mode, imageModel = utilityImageModelNames.dwpose, v
 
   if (isUtilityBirefnetVideoModel(videoModel)) return ["referenceVideoIn"];
   if (isUtilityRifeVideoModel(videoModel)) return ["referenceVideoIn"];
+  if (isUtilityVideoUpscalerModel(videoModel)) return ["referenceVideoIn"];
   if (isUtilityVoidVideoModel(videoModel)) return ["promptIn", "referenceVideoIn", "maskVideoIn"];
   return isUtilitySam3VideoModel(videoModel) ? ["promptIn", "referenceVideoIn"] : ["promptIn", "referenceImageIn", "referenceVideoIn"];
 }
@@ -5399,6 +5571,8 @@ function normalizedUtilityVideoModelName(model) {
   if (normalized.includes("sam") && normalized.includes("video")) return utilityVideoModelNames.sam3Video;
   if (normalized.includes("birefnet")) return utilityVideoModelNames.birefnetVideo;
   if (normalized.includes("rife")) return utilityVideoModelNames.rifeVideo;
+  if (normalized.includes("bytedance") && normalized.includes("upscal")) return utilityVideoModelNames.bytedanceUpscaler;
+  if (normalized.includes("topaz")) return utilityVideoModelNames.topazUpscaler;
   if (normalized.includes("void") || normalized.includes("inpaint")) return utilityVideoModelNames.voidVideoInpainting;
   return utilityVideoModelNames.wanFunControl;
 }
@@ -5861,6 +6035,26 @@ async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, pr
         useCalculatedFps: node.data.rifeUseCalculatedFps !== false,
         fps: node.data.rifeFps || 24,
         loop: Boolean(node.data.rifeLoop)
+      },
+      bytedanceVideoUpscaler: {
+        targetResolution: node.data.bytedanceUpscalerTargetResolution || "1080p",
+        targetFps: node.data.bytedanceUpscalerTargetFps || "30fps",
+        enhancementPreset: node.data.bytedanceUpscalerPreset || "general",
+        enhancementTier: node.data.bytedanceUpscalerTier || "standard",
+        fidelity: node.data.bytedanceUpscalerFidelity || "high",
+        scaleRatio: node.data.bytedanceUpscalerScaleRatio || ""
+      },
+      topazVideoUpscaler: {
+        model: node.data.topazUpscalerModel || "Proteus",
+        upscaleFactor: node.data.topazUpscalerFactor || 2,
+        targetFps: node.data.topazUpscalerTargetFps === "source" ? "" : node.data.topazUpscalerTargetFps || "",
+        billingResolutionTier: node.data.topazUpscalerBillingTier || "auto",
+        h264Output: Boolean(node.data.topazUpscalerH264Output),
+        compression: node.data.topazUpscalerCompression ?? "",
+        noise: node.data.topazUpscalerNoise ?? "",
+        halo: node.data.topazUpscalerHalo ?? "",
+        grain: node.data.topazUpscalerGrain ?? "",
+        recoverDetail: node.data.topazUpscalerRecoverDetail ?? ""
       },
       birefnet: {
         model: node.data.birefnetModel || "General Use (Light)",
@@ -7181,6 +7375,22 @@ function normalizeUtilityData(data = {}) {
     rifeUseCalculatedFps: data.rifeUseCalculatedFps !== false,
     rifeFps: data.rifeFps || 24,
     rifeLoop: Boolean(data.rifeLoop),
+    bytedanceUpscalerTargetResolution: data.bytedanceUpscalerTargetResolution || "1080p",
+    bytedanceUpscalerTargetFps: data.bytedanceUpscalerTargetFps || "30fps",
+    bytedanceUpscalerPreset: data.bytedanceUpscalerPreset || "general",
+    bytedanceUpscalerTier: data.bytedanceUpscalerTier || "standard",
+    bytedanceUpscalerFidelity: data.bytedanceUpscalerFidelity || "high",
+    bytedanceUpscalerScaleRatio: data.bytedanceUpscalerScaleRatio || "",
+    topazUpscalerModel: data.topazUpscalerModel || "Proteus",
+    topazUpscalerFactor: data.topazUpscalerFactor || 2,
+    topazUpscalerTargetFps: data.topazUpscalerTargetFps || "source",
+    topazUpscalerBillingTier: data.topazUpscalerBillingTier || "auto",
+    topazUpscalerH264Output: Boolean(data.topazUpscalerH264Output),
+    topazUpscalerCompression: data.topazUpscalerCompression ?? "",
+    topazUpscalerNoise: data.topazUpscalerNoise ?? "",
+    topazUpscalerHalo: data.topazUpscalerHalo ?? "",
+    topazUpscalerGrain: data.topazUpscalerGrain ?? "",
+    topazUpscalerRecoverDetail: data.topazUpscalerRecoverDetail ?? "",
     numInferenceSteps: data.numInferenceSteps || 27,
     guidanceScale: data.guidanceScale || 6,
     shift: data.shift || 5,
