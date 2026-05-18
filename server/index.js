@@ -27,6 +27,9 @@ const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_
 const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.2419);
 const happyHorse720pCostPerSecond = Number(process.env.HAPPY_HORSE_720P_COST_PER_SECOND || 0.14);
 const happyHorse1080pCostPerSecond = Number(process.env.HAPPY_HORSE_1080P_COST_PER_SECOND || 0.28);
+const seedanceBillingFps = Number(process.env.SEEDANCE_BILLING_FPS || 24);
+const seedanceStandardCostPerThousandTokens = Number(process.env.SEEDANCE_STANDARD_COST_PER_1000_TOKENS || 0.014);
+const seedanceFastCostPerThousandTokens = Number(process.env.SEEDANCE_FAST_COST_PER_1000_TOKENS || (seedanceFastCostPerSecond / 21.6));
 const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.15);
 const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.3);
 const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 0.053);
@@ -176,6 +179,9 @@ app.get("/api/stats", async (_req, res) => {
       seedance: {
         standardCostPerSecond: seedanceStandardCostPerSecond,
         fastCostPerSecond: seedanceFastCostPerSecond,
+        standardCostPerThousandTokens: seedanceStandardCostPerThousandTokens,
+        fastCostPerThousandTokens: seedanceFastCostPerThousandTokens,
+        billingFps: seedanceBillingFps,
         currency: "USD"
       },
       happyHorse: {
@@ -1482,6 +1488,7 @@ app.post("/api/node/generate-video", async (req, res) => {
       speed,
       duration,
       resolution,
+      aspectRatio,
       endpoint,
       routeKind
     });
@@ -2202,6 +2209,7 @@ app.post(
         speed,
         duration,
         resolution,
+        aspectRatio,
         endpoint: route.endpoint,
         routeKind: route.kind
       });
@@ -2742,22 +2750,58 @@ function normalizeVoidVideoFrameCount(value) {
   return voidVideoFrameOptions.reduce((nearest, option) => (Math.abs(option - numeric) < Math.abs(nearest - numeric) ? option : nearest), 85);
 }
 
-function estimateSeedanceCost({ speed, duration, resolution, endpoint, routeKind }) {
+const seedanceResolutionDimensions = {
+  "480p": {
+    "21:9": [992, 432],
+    "16:9": [864, 496],
+    "4:3": [752, 560],
+    "1:1": [640, 640],
+    "3:4": [560, 752],
+    "9:16": [496, 864]
+  },
+  "720p": {
+    "21:9": [1470, 630],
+    "16:9": [1280, 720],
+    "4:3": [1112, 834],
+    "1:1": [960, 960],
+    "3:4": [834, 1112],
+    "9:16": [720, 1280]
+  },
+  "1080p": {
+    // Fal's usage ledger bills 1080p Seedance close to 2K token dimensions,
+    // even when the downloaded MP4 is 1920x1080 or 1080x1920.
+    "21:9": [2352, 1008],
+    "16:9": [2048, 1152],
+    "4:3": [1792, 1344],
+    "1:1": [1536, 1536],
+    "3:4": [1344, 1792],
+    "9:16": [1152, 2048]
+  }
+};
+
+function estimateSeedanceCost({ speed, duration, resolution, aspectRatio, endpoint, routeKind }) {
   const seconds = durationToSeconds(duration);
   const isFast = speed === "fast" || String(endpoint || "").includes("/fast/");
-  const unitRateUsd = isFast ? seedanceFastCostPerSecond : seedanceStandardCostPerSecond;
-  const amountUsd = roundCurrency(seconds * unitRateUsd);
+  const unitRateUsd = isFast ? seedanceFastCostPerThousandTokens : seedanceStandardCostPerThousandTokens;
+  const dimensions = seedanceBillingDimensions(resolution, aspectRatio);
+  const billableUnits = (dimensions.width * dimensions.height * seconds * seedanceBillingFps) / 1024 / 1000;
+  const amountUsd = roundCurrency(billableUnits * unitRateUsd);
 
   return {
     amountUsd,
     currency: "USD",
     unitRateUsd,
-    units: seconds,
-    unit: "second",
+    units: roundUsageUnits(billableUnits),
+    unit: "1K Seedance tokens",
     mediaType: "video",
     resolution,
-    pricingBasis: "Seedance 2.0 fal.ai 720p per-second pricing estimate",
-    pricingSource: "fal-model-page-2026-05-15",
+    aspectRatio,
+    billingWidth: dimensions.width,
+    billingHeight: dimensions.height,
+    durationSeconds: seconds,
+    billingFps: seedanceBillingFps,
+    pricingBasis: "Seedance 2.0 fal.ai token estimate: width * height * duration * 24 / 1024, billed per 1K tokens",
+    pricingSource: "fal-model-page-2026-05-18",
     routeKind
   };
 }
@@ -2779,6 +2823,20 @@ function estimateHappyHorseCost({ duration, resolution, endpoint }) {
     endpoint,
     routeKind: "reference-to-video"
   };
+}
+
+function seedanceBillingDimensions(resolution, aspectRatio) {
+  const normalizedResolution = normalizeChoice(resolution, ["480p", "720p", "1080p"], "720p");
+  const normalizedAspectRatio = normalizeAspectRatio(aspectRatio);
+  const [width, height] =
+    seedanceResolutionDimensions[normalizedResolution]?.[normalizedAspectRatio] ||
+    seedanceResolutionDimensions[normalizedResolution]?.["16:9"] ||
+    seedanceResolutionDimensions["720p"]["16:9"];
+  return { width, height };
+}
+
+function roundUsageUnits(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
 function estimateWanFunControlCost({ endpoint, matchInputNumFrames, numFrames, matchInputFps, fps }) {

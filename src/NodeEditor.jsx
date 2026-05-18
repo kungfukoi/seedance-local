@@ -429,6 +429,7 @@ export default function NodeEditor({ active = true } = {}) {
   const canvasRef = React.useRef(null);
   const projectMenuRef = React.useRef(null);
   const workflowFileInputRef = React.useRef(null);
+  const localWorkflowHandleRef = React.useRef(null);
   const undoStackRef = React.useRef([]);
   const clipboardRef = React.useRef(null);
   const savedDraft = React.useMemo(loadNodeEditorDraft, []);
@@ -448,6 +449,7 @@ export default function NodeEditor({ active = true } = {}) {
   const [savedProjectName, setSavedProjectName] = React.useState(savedDraft.savedProjectName);
   const [projects, setProjects] = React.useState([]);
   const [projectMenuOpen, setProjectMenuOpen] = React.useState(false);
+  const [localWorkflowFileName, setLocalWorkflowFileName] = React.useState("");
   const [contextMenu, setContextMenu] = React.useState(null);
   const [toolbarCollapsed, setToolbarCollapsed] = React.useState(true);
   const [saveStatus, setSaveStatus] = React.useState("");
@@ -1789,7 +1791,91 @@ export default function NodeEditor({ active = true } = {}) {
     }
   }
 
-  async function saveProject() {
+  function currentWorkflowDocument({ id = projectId || createNodeId("workflow"), name = projectName, fileName = null, createdAt = null } = {}) {
+    const now = new Date().toISOString();
+    const cleanProjectName = String(name || "").trim() || "Untitled node project";
+
+    return {
+      id,
+      name: cleanProjectName,
+      fileName,
+      createdAt: createdAt || now,
+      updatedAt: now,
+      app: "NewtNode",
+      version: 1,
+      graph: {
+        nodes,
+        edges,
+        groups,
+        viewport
+      }
+    };
+  }
+
+  async function saveProjectToLocalHandle(handle) {
+    const cleanProjectName = String(projectName || "").trim() || "Untitled node project";
+    const id = projectId || createNodeId("workflow");
+    const workflow = currentWorkflowDocument({
+      id,
+      name: cleanProjectName,
+      fileName: handle.name || localWorkflowFileName || workflowFileNameForProject(cleanProjectName)
+    });
+
+    if (!(await ensureWritableWorkflowHandle(handle))) {
+      throw new Error("Permission to write that workflow file was denied.");
+    }
+
+    await writeWorkflowFileHandle(handle, workflow);
+    setProjectId(id);
+    setProjectName(workflow.name);
+    setSavedProjectName(workflow.name);
+    setLocalWorkflowFileName(handle.name || workflow.fileName);
+    setSaveStatus(`Saved ${handle.name || workflow.fileName}`);
+  }
+
+  async function saveProjectAsLocalFile() {
+    const cleanProjectName = String(projectName || "").trim() || "Untitled node project";
+    const suggestedName = workflowFileNameForProject(cleanProjectName);
+    const id = projectId || createNodeId("workflow");
+
+    try {
+      setSaveStatus("Choosing save location...");
+
+      if (!window.showSaveFilePicker) {
+        const workflow = currentWorkflowDocument({ id, name: cleanProjectName, fileName: suggestedName });
+        downloadWorkflowJson(workflow, suggestedName);
+        setProjectId(id);
+        setProjectName(workflow.name);
+        setSavedProjectName(workflow.name);
+        setLocalWorkflowFileName("");
+        setSaveStatus("Downloaded workflow JSON. This browser cannot keep a local save target.");
+        return;
+      }
+
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [
+          {
+            description: "NewtNode workflow JSON",
+            accept: {
+              "application/json": [".json"]
+            }
+          }
+        ]
+      });
+
+      await saveProjectToLocalHandle(handle);
+      localWorkflowHandleRef.current = handle;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        setSaveStatus("Save As canceled");
+        return;
+      }
+      setSaveStatus(error.message || "Could not save workflow JSON.");
+    }
+  }
+
+  async function saveProjectToSavedWorkflows() {
     try {
       const cleanProjectName = String(projectName || "").trim() || "Untitled node project";
       const lastSavedName = String(savedProjectName || selectedProjectName || "").trim();
@@ -1820,8 +1906,24 @@ export default function NodeEditor({ active = true } = {}) {
     }
   }
 
+  async function saveProject() {
+    if (localWorkflowHandleRef.current) {
+      try {
+        setSaveStatus("Saving local workflow...");
+        await saveProjectToLocalHandle(localWorkflowHandleRef.current);
+      } catch (error) {
+        setSaveStatus(error.message || "Could not save workflow JSON.");
+      }
+      return;
+    }
+
+    await saveProjectToSavedWorkflows();
+  }
+
   function applyWorkflow(project, sourceLabel = "Loaded") {
     const graph = normalizeEditorGraph(project.graph?.nodes || [], project.graph?.edges || [], project.graph?.groups || []);
+    localWorkflowHandleRef.current = null;
+    setLocalWorkflowFileName("");
     setProjectId(project.id || null);
     setProjectName(project.name || "Untitled node project");
     setSavedProjectName(project.name || null);
@@ -2182,6 +2284,10 @@ export default function NodeEditor({ active = true } = {}) {
           <button onClick={saveProject} title="Save project">
             <Save size={16} />
             <span>Save</span>
+          </button>
+          <button onClick={saveProjectAsLocalFile} title={localWorkflowFileName ? `Save As local workflow. Current target: ${localWorkflowFileName}` : "Save workflow JSON to a local file"}>
+            <Save size={16} />
+            <span>Save As</span>
           </button>
           <button onClick={() => workflowFileInputRef.current?.click()} title="Open workflow JSON">
             <FolderOpen size={16} />
@@ -6840,6 +6946,42 @@ function cloneNode(node) {
 function createNodeId(type, suffix = "") {
   const randomPart = Math.random().toString(36).slice(2, 8);
   return [type, Date.now(), suffix, randomPart].filter(Boolean).join("-");
+}
+
+function workflowFileNameForProject(name) {
+  const cleanName = String(name || "Untitled node project")
+    .trim()
+    .replace(/[^a-z0-9-_ ]+/gi, "")
+    .replace(/\s+/g, "-")
+    .toLowerCase();
+  return `${cleanName || "newtnode-workflow"}.json`;
+}
+
+async function ensureWritableWorkflowHandle(handle) {
+  if (!handle?.queryPermission || !handle?.requestPermission) return true;
+  const options = { mode: "readwrite" };
+  const currentPermission = await handle.queryPermission(options);
+  if (currentPermission === "granted") return true;
+  return (await handle.requestPermission(options)) === "granted";
+}
+
+async function writeWorkflowFileHandle(handle, workflow) {
+  const writable = await handle.createWritable();
+  try {
+    await writable.write(JSON.stringify(workflow, null, 2));
+  } finally {
+    await writable.close();
+  }
+}
+
+function downloadWorkflowJson(workflow, fileName) {
+  const blob = new Blob([JSON.stringify(workflow, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function resetCopiedNodeRuntime(data = {}) {

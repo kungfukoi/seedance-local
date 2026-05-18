@@ -13,7 +13,10 @@ import {
 const defaultPricing = {
   seedance: {
     standardCostPerSecond: 0.3034,
-    fastCostPerSecond: 0.2419
+    fastCostPerSecond: 0.2419,
+    standardCostPerThousandTokens: 0.014,
+    fastCostPerThousandTokens: 0.0112,
+    billingFps: 24
   },
   nanoBananaPro: {
     cost1K2K: 0.15,
@@ -483,9 +486,7 @@ function estimateItemCost(item, mediaType, pricing) {
   }
 
   if (modelKey.includes("seedance") || modelKey.includes("bytedance/seedance")) {
-    const isFast = settings.speed === "fast" || String(item.endpoint || "").includes("/fast/");
-    const rate = isFast ? pricing.seedance.fastCostPerSecond : pricing.seedance.standardCostPerSecond;
-    return durationToSeconds(settings.duration) * rate;
+    return estimateSeedanceStatsCost(item, settings, pricing);
   }
 
   if (modelKey.includes("wan-fun-control") || modelKey.includes("wan fun control")) {
@@ -545,6 +546,62 @@ function estimateMegapixelCost(image, unitRateUsd) {
   const height = Number(image?.height || 0);
   if (width <= 0 || height <= 0) return null;
   return (width * height * unitRateUsd) / 1000000;
+}
+
+const seedanceResolutionDimensions = {
+  "480p": {
+    "21:9": [992, 432],
+    "16:9": [864, 496],
+    "4:3": [752, 560],
+    "1:1": [640, 640],
+    "3:4": [560, 752],
+    "9:16": [496, 864]
+  },
+  "720p": {
+    "21:9": [1470, 630],
+    "16:9": [1280, 720],
+    "4:3": [1112, 834],
+    "1:1": [960, 960],
+    "3:4": [834, 1112],
+    "9:16": [720, 1280]
+  },
+  "1080p": {
+    "21:9": [2352, 1008],
+    "16:9": [2048, 1152],
+    "4:3": [1792, 1344],
+    "1:1": [1536, 1536],
+    "3:4": [1344, 1792],
+    "9:16": [1152, 2048]
+  }
+};
+
+function estimateSeedanceStatsCost(item, settings, pricing) {
+  const seedancePricing = pricing.seedance || defaultPricing.seedance;
+  const isFast = settings.speed === "fast" || String(item.endpoint || "").includes("/fast/");
+  const fallbackTokenRate =
+    isFast && seedancePricing.fastCostPerSecond
+      ? seedancePricing.fastCostPerSecond / 21.6
+      : seedancePricing.standardCostPerSecond
+        ? seedancePricing.standardCostPerSecond / 21.6
+        : defaultPricing.seedance.standardCostPerThousandTokens;
+  const unitRate = isFast
+    ? seedancePricing.fastCostPerThousandTokens || fallbackTokenRate
+    : seedancePricing.standardCostPerThousandTokens || fallbackTokenRate;
+  const billingFps = Number(seedancePricing.billingFps || defaultPricing.seedance.billingFps);
+  const durationSeconds = durationToSeconds(settings.duration || item.cost?.durationSeconds || item.cost?.units);
+  const dimensions = seedanceBillingDimensions(settings.resolution || item.cost?.resolution, settings.aspectRatio || item.cost?.aspectRatio);
+  const billableUnits = (dimensions.width * dimensions.height * durationSeconds * billingFps) / 1024 / 1000;
+  return billableUnits * unitRate;
+}
+
+function seedanceBillingDimensions(resolution, aspectRatio) {
+  const normalizedResolution = normalizeChoice(resolution, ["480p", "720p", "1080p"], "720p");
+  const normalizedAspectRatio = normalizeAspectRatio(aspectRatio);
+  const [width, height] =
+    seedanceResolutionDimensions[normalizedResolution]?.[normalizedAspectRatio] ||
+    seedanceResolutionDimensions[normalizedResolution]?.["16:9"] ||
+    seedanceResolutionDimensions["720p"]["16:9"];
+  return { width, height };
 }
 
 function estimatePatinaStatsCost(item, pricing) {
@@ -639,6 +696,16 @@ function durationToSeconds(duration) {
   if (duration === "auto") return 15;
   const match = String(duration || "15").match(/\d+/);
   return Number(match?.[0] || 15);
+}
+
+function normalizeChoice(value, choices, fallback) {
+  const normalized = String(value || fallback);
+  return choices.includes(normalized) ? normalized : fallback;
+}
+
+function normalizeAspectRatio(value) {
+  const normalized = String(value || "16:9").match(/\d+:\d+/)?.[0] || "16:9";
+  return normalizeChoice(normalized, ["auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"], "16:9");
 }
 
 function formatCostLabel(row) {
