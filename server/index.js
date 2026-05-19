@@ -36,6 +36,8 @@ const seedanceFastCostPerThousandTokens = Number(process.env.SEEDANCE_FAST_COST_
 const nanoBananaCost1K2K = Number(process.env.NANO_BANANA_IMAGE_COST_1K_2K || 0.15);
 const nanoBananaCost4K = Number(process.env.NANO_BANANA_IMAGE_COST_4K || 0.3);
 const openAiImage2MediumCost = Number(process.env.OPENAI_IMAGE_2_MEDIUM_COST || 0.053);
+const nanoImageAspectRatios = ["21:9", "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4"];
+const openAiImageAspectRatios = nanoImageAspectRatios;
 const falTextRequestCost = Number(process.env.FAL_TEXT_REQUEST_COST || 0.001);
 const falVisionTextUnitCost = Number(process.env.FAL_VISION_TEXT_UNIT_COST || 0.01);
 const falVideoTextUnitCost = Number(process.env.FAL_VIDEO_TEXT_UNIT_COST || 0.01);
@@ -189,6 +191,7 @@ app.get("/api/health", (_req, res) => {
     routes: {
       utilityImage: true,
       utilityVideo: true,
+      colorIdMatte: true,
       composerFrame: true,
       composerPoses: true,
       apiJsonErrors: true,
@@ -546,6 +549,83 @@ app.post("/api/node/upload-transfer-collage", upload.single("asset"), async (req
   return handleTransferCollageUpload(req, res);
 });
 
+app.post("/api/node/color-id-matte", upload.single("asset"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No Color ID matte uploaded." });
+    }
+
+    const fileName = uniqueOutputFileName("color-id-matte", ".png");
+    const outputPath = path.join(outputsDir, fileName);
+    await rename(req.file.path, outputPath);
+
+    const selectedColor = String(req.body.selectedColor || "").slice(0, 16);
+    const tolerance = clampInteger(req.body.tolerance, 0, 96, 0);
+    const sampleRadius = clampInteger(req.body.sampleRadius, 0, 3, 0);
+    const invert = String(req.body.invert || "").toLowerCase() === "true";
+    const width = positiveNumber(req.body.width);
+    const height = positiveNumber(req.body.height);
+    const matchedPixels = positiveNumber(req.body.matchedPixels);
+    const text = `Color ID matte${selectedColor ? ` for ${selectedColor}` : ""}.`;
+    const cost = {
+      amountUsd: 0,
+      currency: "USD",
+      unitRateUsd: 0,
+      units: 1,
+      unit: "local mask",
+      mediaType: "image",
+      pricingBasis: "Local Color ID matte generation",
+      pricingSource: "local-color-id-matte"
+    };
+
+    await appendHistory({
+      id: randomUUID(),
+      createdAt: new Date().toISOString(),
+      mediaType: "image",
+      provider: "local",
+      modelName: "Color ID Matte",
+      endpoint: "local/color-id-matte",
+      mode: "Color ID matte",
+      prompt: text,
+      submittedPrompt: text,
+      project: projectFromBody(req.body),
+      node: nodeFromBody(req.body),
+      settings: {
+        model: "Color ID Matte",
+        sourceImageUrl: req.body.sourceImageUrl || "",
+        selectedColor,
+        tolerance,
+        sampleRadius,
+        invert,
+        width,
+        height,
+        matchedPixels
+      },
+      cost,
+      localImage: `/outputs/${fileName}`,
+      outputFileName: fileName,
+      outputBytes: req.file.size,
+      text
+    });
+
+    res.json({
+      modelName: "Color ID Matte",
+      text,
+      cost,
+      image: {
+        label: "Color ID Matte",
+        localUrl: `/outputs/${fileName}`,
+        fileName,
+        mimeType: "image/png"
+      }
+    });
+  } catch (error) {
+    if (req.file?.path) await rm(req.file.path, { force: true }).catch(() => {});
+    console.error(error);
+    sendApiError(res, error, "Color ID matte failed.");
+  }
+});
+
 app.post("/api/node/process-text", async (req, res) => {
   try {
     const text = String(req.body.text || "").trim();
@@ -647,6 +727,13 @@ app.post("/api/node/generate-image", async (req, res) => {
       });
     }
 
+    const requestedAspectRatio = req.body.requestedAspectRatio || req.body.aspectRatio;
+    const aspectRatio = await resolveImageGenerationAspectRatio({
+      value: req.body.aspectRatio,
+      imagePromptUrls,
+      provider: selectedModel.provider
+    });
+
     if (selectedModel.provider === "openai") {
       if (!openAiImageApiKey) {
         return res.status(400).json({ error: "Missing OPENAI_IMAGE_API_KEY in .env." });
@@ -656,7 +743,7 @@ app.post("/api/node/generate-image", async (req, res) => {
         prompt,
         imagePromptUrls,
         imagePromptLabels,
-        aspectRatio: req.body.aspectRatio,
+        aspectRatio,
         resolution: req.body.resolution
       });
       const extension = extensionForMime(openAiImage.mimeType);
@@ -682,7 +769,8 @@ app.post("/api/node/generate-image", async (req, res) => {
         node: nodeFromBody(req.body),
         settings: {
           model: req.body.model || selectedModel.displayName,
-          aspectRatio: req.body.aspectRatio || "21:9",
+          aspectRatio,
+          requestedAspectRatio: requestedAspectRatio || aspectRatio,
           resolution: req.body.resolution || "2K",
           imageSize: openAiImage.size,
           quality: openAiImage.quality,
@@ -713,7 +801,7 @@ app.post("/api/node/generate-image", async (req, res) => {
 
     const model = selectedModel.id;
     const imageConfig = {
-      aspectRatio: normalizeGeminiImageAspectRatio(req.body.aspectRatio),
+      aspectRatio: normalizeGeminiImageAspectRatio(aspectRatio),
       imageSize: normalizeGeminiImageSize(req.body.resolution)
     };
     const parts = [{ text: prompt }];
@@ -760,7 +848,8 @@ app.post("/api/node/generate-image", async (req, res) => {
       node: nodeFromBody(req.body),
       settings: {
         model: req.body.model || selectedModel.displayName,
-        aspectRatio: req.body.aspectRatio || "21:9",
+        aspectRatio,
+        requestedAspectRatio: requestedAspectRatio || aspectRatio,
         resolution: req.body.resolution || "2K",
         imageConfig,
         attempts,
@@ -887,11 +976,15 @@ async function runSam3ImageSegmentation(req, res, { prompt, imagePromptUrls, ima
 
 app.post("/api/node/utility-image", async (req, res) => {
   try {
+    const selectedModel = resolveUtilityImageModel(req.body.model);
+    if (selectedModel.provider === "local-color-id-matte") {
+      return res.status(400).json({ error: "Color ID Matte is generated locally from the picker." });
+    }
+
     if (!process.env.FAL_KEY) {
       return res.status(400).json({ error: "Missing FAL_KEY in .env." });
     }
 
-    const selectedModel = resolveUtilityImageModel(req.body.model);
     const imageUrl = firstLocalOutput(req.body.imageUrls);
     if (!imageUrl) {
       return res.status(400).json({ error: `${selectedModel.displayName} requires a connected image.` });
@@ -3789,6 +3882,14 @@ function resolveImageModel(model) {
 
 function resolveUtilityImageModel(model) {
   const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("color") && normalized.includes("matte")) {
+    return {
+      provider: "local-color-id-matte",
+      displayName: "Color ID Matte",
+      id: "local/color-id-matte"
+    };
+  }
+
   if (normalized.includes("sam") && normalized.includes("image")) {
     return {
       provider: "fal-sam3-image",
@@ -3947,6 +4048,153 @@ function resolveVideoModel(model) {
     id: `bytedance/seedance-2.0/${speed === "fast" ? "fast/" : ""}`,
     speed
   };
+}
+
+async function resolveImageGenerationAspectRatio({ value, imagePromptUrls, provider }) {
+  if (!isAutoImageAspectRatio(value)) {
+    return normalizeImageAspectRatioForProvider(value, provider);
+  }
+
+  const dimensions = await firstImageDimensions(imagePromptUrls);
+  if (!dimensions) {
+    throw httpError(400, "Auto aspect ratio needs a connected image.");
+  }
+
+  return closestAspectRatio(dimensions.width / Math.max(1, dimensions.height), imageAspectRatiosForProvider(provider));
+}
+
+function normalizeImageAspectRatioForProvider(value, provider) {
+  const ratio = String(value || "21:9").match(/\d+:\d+/)?.[0] || "21:9";
+  return normalizeChoice(ratio, imageAspectRatiosForProvider(provider), "21:9");
+}
+
+function imageAspectRatiosForProvider(provider) {
+  return provider === "openai" ? openAiImageAspectRatios : nanoImageAspectRatios;
+}
+
+function isAutoImageAspectRatio(value) {
+  return String(value || "").toLowerCase() === "auto";
+}
+
+async function firstImageDimensions(imagePromptUrls = []) {
+  for (const imagePromptUrl of imagePromptUrls) {
+    try {
+      const asset = await readLocalAsset(imagePromptUrl);
+      if (!asset.mimeType.startsWith("image/")) continue;
+      const dimensions = imageDimensionsFromBuffer(asset.buffer, asset.mimeType);
+      if (dimensions) return dimensions;
+    } catch {
+      // Try the next reference; the caller reports a clear Auto failure if none work.
+    }
+  }
+
+  return null;
+}
+
+function imageDimensionsFromBuffer(buffer, mimeType = "") {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 24) return null;
+  const normalizedMime = String(mimeType || "").toLowerCase();
+
+  if (normalizedMime.includes("png") || buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return {
+      width: buffer.readUInt32BE(16),
+      height: buffer.readUInt32BE(20)
+    };
+  }
+
+  if (normalizedMime.includes("jpeg") || normalizedMime.includes("jpg") || (buffer[0] === 0xff && buffer[1] === 0xd8)) {
+    return jpegDimensionsFromBuffer(buffer);
+  }
+
+  if (normalizedMime.includes("webp") || (buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP")) {
+    return webpDimensionsFromBuffer(buffer);
+  }
+
+  return null;
+}
+
+function jpegDimensionsFromBuffer(buffer) {
+  let offset = 2;
+
+  while (offset < buffer.length - 9) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+
+    while (buffer[offset] === 0xff) offset += 1;
+    const marker = buffer[offset];
+    offset += 1;
+
+    if (marker === 0xd8 || marker === 0x01) continue;
+    if (marker === 0xd9 || marker === 0xda) break;
+    if (offset + 2 > buffer.length) break;
+
+    const length = buffer.readUInt16BE(offset);
+    const isStartOfFrame =
+      marker >= 0xc0 &&
+      marker <= 0xcf &&
+      ![0xc4, 0xc8, 0xcc].includes(marker);
+
+    if (isStartOfFrame && offset + 7 <= buffer.length) {
+      return {
+        height: buffer.readUInt16BE(offset + 3),
+        width: buffer.readUInt16BE(offset + 5)
+      };
+    }
+
+    if (length < 2) break;
+    offset += length;
+  }
+
+  return null;
+}
+
+function webpDimensionsFromBuffer(buffer) {
+  const chunkType = buffer.toString("ascii", 12, 16);
+
+  if (chunkType === "VP8X" && buffer.length >= 30) {
+    return {
+      width: 1 + buffer.readUIntLE(24, 3),
+      height: 1 + buffer.readUIntLE(27, 3)
+    };
+  }
+
+  if (chunkType === "VP8L" && buffer.length >= 25) {
+    const b0 = buffer[21];
+    const b1 = buffer[22];
+    const b2 = buffer[23];
+    const b3 = buffer[24];
+    return {
+      width: 1 + (((b1 & 0x3f) << 8) | b0),
+      height: 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6))
+    };
+  }
+
+  if (chunkType === "VP8 " && buffer.length >= 30) {
+    return {
+      width: buffer.readUInt16LE(26) & 0x3fff,
+      height: buffer.readUInt16LE(28) & 0x3fff
+    };
+  }
+
+  return null;
+}
+
+function closestAspectRatio(ratio, options = []) {
+  const normalizedRatio = Number(ratio);
+  if (!Number.isFinite(normalizedRatio) || normalizedRatio <= 0) return options[0] || "21:9";
+
+  return options.reduce((closest, option) => {
+    const optionRatio = aspectRatioNumber(option);
+    const closestRatio = aspectRatioNumber(closest);
+    return Math.abs(Math.log(optionRatio / normalizedRatio)) < Math.abs(Math.log(closestRatio / normalizedRatio)) ? option : closest;
+  }, options[0] || "21:9");
+}
+
+function aspectRatioNumber(value) {
+  const [width = 21, height = 9] = String(value || "").match(/\d+:\d+/)?.[0]?.split(":").map(Number) || [];
+  return width > 0 && height > 0 ? width / height : 21 / 9;
 }
 
 function normalizeGeminiImageAspectRatio(value) {
@@ -4159,7 +4407,37 @@ function normalizeOpenAiImageSize({ aspectRatio, resolution }) {
     }
   };
 
-  return sizeMap[normalizedResolution]?.[ratio] || sizeMap["2K"]["21:9"];
+  return sizeMap[normalizedResolution]?.[ratio] || openAiImageSizeForAspectRatio(ratio, normalizedResolution);
+}
+
+function openAiImageSizeForAspectRatio(aspectRatio, resolution) {
+  const ratio = aspectRatioNumber(aspectRatio);
+  const normalizedResolution = ["1K", "2K", "4K"].includes(resolution) ? resolution : "2K";
+  const longSideMap = { "1K": 1280, "2K": 2048, "4K": 3840 };
+  const squareSideMap = { "1K": 1024, "2K": 2048, "4K": 2880 };
+  const maxPixelsMap = { "1K": 1024 * 1024, "2K": 2048 * 2048, "4K": 3840 * 2160 };
+
+  if (Math.abs(ratio - 1) < 0.01) {
+    const side = squareSideMap[normalizedResolution];
+    return `${side}x${side}`;
+  }
+
+  const longSide = longSideMap[normalizedResolution];
+  let width = ratio >= 1 ? longSide : longSide * ratio;
+  let height = ratio >= 1 ? longSide / ratio : longSide;
+  const maxPixels = maxPixelsMap[normalizedResolution];
+
+  if (width * height > maxPixels) {
+    const scale = Math.sqrt(maxPixels / (width * height));
+    width *= scale;
+    height *= scale;
+  }
+
+  return `${roundOpenAiImageDimension(width)}x${roundOpenAiImageDimension(height)}`;
+}
+
+function roundOpenAiImageDimension(value) {
+  return Math.max(256, Math.floor(Number(value || 0) / 16) * 16);
 }
 
 function mimeForOpenAiOutputFormat(format) {

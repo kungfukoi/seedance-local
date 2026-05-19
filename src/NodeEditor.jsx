@@ -59,6 +59,9 @@ const portColors = {
 
 const maxTransferImages = 6;
 const batchOptions = ["1", "2", "3", "4"];
+const imageModelAutoAspectRatio = "Auto";
+const nanoImageAspectRatios = ["21:9", "16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4"];
+const openAiImageAspectRatios = nanoImageAspectRatios;
 const happyHorseDurationOptions = Array.from({ length: 13 }, (_value, index) => `${index + 3} seconds`);
 const voidVideoFrameOptions = [69, 77, 85, 93, 101, 109, 117, 125, 133, 141, 149, 157, 165, 173, 181, 189, 197];
 const composerMannequinModelPath = "/models/male_mannequin.glb";
@@ -389,6 +392,7 @@ const videoModelNames = {
   sam3Video: "SAM 3 Video"
 };
 const utilityImageModelNames = {
+  colorIdMatte: "Color ID Matte",
   dwpose: "DWPose",
   depthAnything: "Depth Anything",
   patina: "Patina",
@@ -447,6 +451,7 @@ const topazUpscalerBillingTierOptions = [
   ["above-1080p", "Above 1080p"]
 ];
 const utilityModelDescriptions = {
+  [utilityImageModelNames.colorIdMatte]: "Creates a black and white ID matte from pixels matching a picked source-image color.",
   [utilityImageModelNames.dwpose]: "Creates pose/control maps from a source image for character and body-guided generation.",
   [utilityImageModelNames.depthAnything]: "Extracts a depth map from an image for depth-aware control and composition.",
   [utilityImageModelNames.patina]: "Generates PBR texture maps such as basecolor, normal, roughness, metalness, and height.",
@@ -2150,14 +2155,16 @@ export default function NodeEditor({ active = true } = {}) {
       if (currentNode.type === "imageModel") {
         const isSegmentation = isSam3ImageModel(currentNode.data.model);
         const imagePromptItems = connectedImagePromptItems(isSegmentation ? incoming.imagePromptIn || [] : [...(incoming.imagePromptIn || []), ...(incoming.transferIn || [])]);
+        const aspectRatio = isSegmentation ? currentNode.data.aspectRatio : await resolveImageModelAspectRatio(currentNode, incoming);
         const prompt = isSegmentation
           ? basePrompt
-          : buildEffectiveImagePrompt(basePrompt, [...(incoming.imagePromptIn || []), ...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], currentNode.data.aspectRatio);
+          : buildEffectiveImagePrompt(basePrompt, [...(incoming.imagePromptIn || []), ...(incoming.cameraIn || []), ...(incoming.styleIn || []), ...(incoming.transferIn || [])], aspectRatio);
         const runIndexes = Array.from({ length: batchCount }, (_, index) => index);
         const settled = await settleSequential(runIndexes, (index) =>
           runImageModelGeneration({
             node: currentNode,
             prompt,
+            aspectRatio,
             imagePromptItems,
             projectId,
             projectName,
@@ -4293,6 +4300,7 @@ function NodeBody({
     const maskVideoPort = config.input.find((port) => port.id === "maskVideoIn");
     const utilityImageModel = normalizedUtilityImageModelName(node.data.utilityImageModel);
     const utilityVideoModel = normalizedUtilityVideoModelName(node.data.utilityVideoModel);
+    const isColorIdMatte = isUtilityColorIdMatteModel(utilityImageModel);
     const isDepthAnything = isDepthAnythingModel(utilityImageModel);
     const isPatina = isPatinaModel(utilityImageModel);
     const isSam3Image = isUtilitySam3ImageModel(utilityImageModel);
@@ -4321,7 +4329,7 @@ function NodeBody({
     const resultType = node.data.resultType || mode;
     const canRun = isVideoMode
       ? Boolean(incoming.referenceVideoIn?.length) && (isBirefnetVideo || isRifeVideo || isVideoUpscaler || Boolean(promptValue.trim()))
-      : Boolean(incoming.imageIn?.length) && (!isSam3Image || Boolean(promptValue.trim()));
+      : Boolean(incoming.imageIn?.length) && (!isSam3Image || Boolean(promptValue.trim())) && (!isColorIdMatte || Boolean(normalizeColorIdMatteColor(node.data.colorIdMatteColor)));
     const utilityRunLabel = isVideoMode
       ? isSam3Video
         ? "Run SAM 3 Video"
@@ -4336,7 +4344,9 @@ function NodeBody({
                 : isTopazUpscaler
                   ? "Run Topaz Upscale"
                   : "Run Wan Fun Control"
-      : isSam3Image
+      : isColorIdMatte
+        ? "Run Color Matte"
+        : isSam3Image
         ? "Run SAM 3 Image"
         : isBirefnetImage
           ? "Run BiRefNet Image"
@@ -4715,6 +4725,7 @@ function NodeBody({
             <>
               <NodeRow label="Model">
                 <select value={utilityImageModel} onChange={(event) => onUpdate(node.id, { utilityImageModel: event.target.value, resultUrl: "", resultItems: [], resultType: "image", error: "" })}>
+                  <option>{utilityImageModelNames.colorIdMatte}</option>
                   <option>{utilityImageModelNames.dwpose}</option>
                   <option>{utilityImageModelNames.depthAnything}</option>
                   <option>{utilityImageModelNames.patina}</option>
@@ -4730,7 +4741,9 @@ function NodeBody({
               <NodeRow label="Image" inputPort={settingsOpen ? imagePort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
                 <button className={incoming.imageIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.imageIn, "Add image")}</button>
               </NodeRow>
-              {isPatina ? (
+              {isColorIdMatte ? (
+                <ColorIdMattePicker imageUrl={connectedAssetUrls(incoming.imageIn).at(-1)} node={node} onUpdate={onUpdate} />
+              ) : isPatina ? (
                 <>
                   {patinaMapOptions.map((option) => (
                     <NodeRow key={option.id} label={option.label}>
@@ -4864,7 +4877,7 @@ function NodeBody({
             <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
           </NodeRow>
           <NodeRow label="Model">
-            <select value={node.data.model} onChange={(event) => onUpdate(node.id, { model: event.target.value })}>
+            <select value={node.data.model} onChange={(event) => onUpdate(node.id, imageModelSelectionPatch(node.data, event.target.value))}>
               <option>Nano Banana Pro</option>
               <option>OpenAI Image 2</option>
               {sam3SegmentationModelsEnabled && <option>SAM 3 Image</option>}
@@ -4895,10 +4908,11 @@ function NodeBody({
               </NodeRow>
               <NodeRow label="Aspect Ratio">
                 <select value={node.data.aspectRatio} onChange={(event) => onUpdate(node.id, { aspectRatio: event.target.value })}>
-                  <option>21:9</option>
-                  <option>16:9</option>
-                  <option>1:1</option>
-                  <option>9:16</option>
+                  {imageModelAspectRatioOptions(node.data.model).map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
                 </select>
               </NodeRow>
               <NodeRow label="Resolution">
@@ -5199,6 +5213,158 @@ function ResultPane({ label, resultUrl, resultItems = [], selectedIndex = 0, typ
   );
 }
 
+function ColorIdMattePicker({ imageUrl, node, onUpdate }) {
+  const canvasRef = React.useRef(null);
+  const largeCanvasRef = React.useRef(null);
+  const sourceImageDataRef = React.useRef(null);
+  const matteImageDataRef = React.useRef(null);
+  const [pickerStatus, setPickerStatus] = React.useState("");
+  const [pickerOpen, setPickerOpen] = React.useState(false);
+  const [pickerView, setPickerView] = React.useState("rgb");
+  const selectedColor = normalizeColorIdMatteColor(node.data.colorIdMatteColor);
+  const tolerance = colorIdMatteTolerance(node.data.colorIdMatteTolerance);
+  const sampleRadius = colorIdMatteSampleRadius(node.data.colorIdMatteSampleRadius);
+  const invert = Boolean(node.data.colorIdMatteInvert);
+  const selectedHex = selectedColor ? rgbToHex(selectedColor) : "None";
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    async function drawPicker() {
+      const canvas = canvasRef.current;
+      if (!canvas || !imageUrl) {
+        sourceImageDataRef.current = null;
+        matteImageDataRef.current = null;
+        return;
+      }
+
+      try {
+        const image = await loadCanvasImage(imageUrl);
+        if (cancelled) return;
+
+        const sourceImageData = drawColorIdMattePickerCanvas(canvas, image);
+        const width = sourceImageData.width;
+        const height = sourceImageData.height;
+        sourceImageDataRef.current = sourceImageData;
+        const matteImageData = selectedColor ? colorIdMatteImageData(sourceImageData, selectedColor, tolerance, invert).imageData : null;
+        matteImageDataRef.current = matteImageData;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        renderColorIdMattePickerPreview(context, sourceImageData, selectedColor, tolerance, invert, "overlay");
+
+        const largeCanvas = largeCanvasRef.current;
+        if (largeCanvas) {
+          largeCanvas.width = width;
+          largeCanvas.height = height;
+          const largeContext = largeCanvas.getContext("2d", { willReadFrequently: true });
+          if (pickerView === "matte" && matteImageData) {
+            largeContext.putImageData(matteImageData, 0, 0);
+          } else {
+            renderColorIdMattePickerPreview(largeContext, sourceImageData, selectedColor, tolerance, invert, "rgb");
+          }
+        }
+        setPickerStatus("");
+      } catch (error) {
+        sourceImageDataRef.current = null;
+        matteImageDataRef.current = null;
+        setPickerStatus(error.message || "Could not load image.");
+      }
+    }
+
+    drawPicker();
+    return () => {
+      cancelled = true;
+    };
+  }, [imageUrl, selectedColor?.r, selectedColor?.g, selectedColor?.b, tolerance, invert, pickerOpen, pickerView]);
+
+  function pickColor(event, canvas = canvasRef.current) {
+    const imageData = sourceImageDataRef.current;
+    if (!canvas || !imageData) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.min(imageData.width - 1, Math.max(0, Math.floor((event.clientX - rect.left) * (imageData.width / rect.width))));
+    const y = Math.min(imageData.height - 1, Math.max(0, Math.floor((event.clientY - rect.top) * (imageData.height / rect.height))));
+    const color = averageColorFromImageData(imageData, x, y, sampleRadius);
+    if (!color) return;
+
+    onUpdate(node.id, {
+      colorIdMatteColor: color,
+      error: ""
+    });
+  }
+
+  return (
+    <>
+      <NodeRow label="Picker">
+        <div className="color-id-picker-shell">
+          <div className={`color-id-picker ${imageUrl ? "" : "empty"}`} onPointerDown={(event) => event.stopPropagation()}>
+            {imageUrl ? <canvas ref={canvasRef} onClick={(event) => pickColor(event)} title="Pick color" /> : <span>No image</span>}
+          </div>
+          <button type="button" className="color-id-enlarge-button" onClick={() => setPickerOpen(true)} disabled={!imageUrl}>
+            Enlarge
+          </button>
+        </div>
+      </NodeRow>
+      <NodeRow label="Selected">
+        <div className="color-id-selected">
+          <span className="color-id-swatch" style={{ backgroundColor: selectedColor ? rgbToHex(selectedColor) : "transparent" }} />
+          <span>{selectedHex}</span>
+        </div>
+      </NodeRow>
+      <NodeRow label="Tolerance">
+        <div className="color-id-slider">
+          <input type="range" min="0" max="96" step="1" value={tolerance} onChange={(event) => onUpdate(node.id, { colorIdMatteTolerance: event.target.value })} />
+          <span>{tolerance}</span>
+        </div>
+      </NodeRow>
+      <NodeRow label="Sample">
+        <select value={String(sampleRadius)} onChange={(event) => onUpdate(node.id, { colorIdMatteSampleRadius: event.target.value })}>
+          <option value="0">1 px</option>
+          <option value="1">3 px</option>
+          <option value="2">5 px</option>
+          <option value="3">7 px</option>
+        </select>
+      </NodeRow>
+      <NodeRow label="Invert">
+        <button className={`node-toggle ${invert ? "enabled" : ""}`} onClick={() => onUpdate(node.id, { colorIdMatteInvert: !invert })}>
+          <span />
+        </button>
+      </NodeRow>
+      {pickerStatus && <small className="upload-error color-id-status">{pickerStatus}</small>}
+      {pickerOpen && (
+        <div className="color-id-picker-modal" role="dialog" aria-modal="true" aria-label="Color ID matte picker" onPointerDown={(event) => event.stopPropagation()}>
+          <div className="color-id-picker-modal-panel">
+            <div className="color-id-picker-modal-header">
+              <div className="color-id-selected">
+                <span className="color-id-swatch" style={{ backgroundColor: selectedColor ? rgbToHex(selectedColor) : "transparent" }} />
+                <span>{selectedHex}</span>
+              </div>
+              <div className="color-id-view-toggle" role="group" aria-label="Picker view">
+                <button type="button" className={pickerView === "rgb" ? "active" : ""} aria-pressed={pickerView === "rgb"} onClick={() => setPickerView("rgb")}>
+                  RGB
+                </button>
+                <button type="button" className={pickerView === "matte" ? "active" : ""} aria-pressed={pickerView === "matte"} onClick={() => setPickerView("matte")} disabled={!selectedColor}>
+                  Matte
+                </button>
+              </div>
+              <button type="button" className="color-id-picker-close" onClick={() => setPickerOpen(false)} title="Close picker">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="color-id-picker-large">
+              <canvas ref={largeCanvasRef} onClick={(event) => pickColor(event, largeCanvasRef.current)} title="Pick color" />
+            </div>
+            <div className="color-id-modal-controls">
+              <span>Tolerance</span>
+              <input type="range" min="0" max="96" step="1" value={tolerance} onChange={(event) => onUpdate(node.id, { colorIdMatteTolerance: event.target.value })} />
+              <strong>{tolerance}</strong>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function NodeRow({ label, children, inputPort, node, onConnectStart, onDisconnectInput, connectedPortKeys }) {
   return (
     <div className={`node-row ${inputPort ? "has-port" : ""}`}>
@@ -5368,6 +5534,10 @@ function createDefaultNodeData(type, label, count) {
       patinaMaps: patinaMapOptions.map((option) => option.id),
       patinaOutputFormat: "png",
       patinaSeed: "",
+      colorIdMatteColor: null,
+      colorIdMatteTolerance: 0,
+      colorIdMatteSampleRadius: 0,
+      colorIdMatteInvert: false,
       sam3VideoDetectionThreshold: 0.5,
       prompt: "",
       batchCount: "1",
@@ -5426,6 +5596,35 @@ function createDefaultNodeData(type, label, count) {
     generateAudio: true,
     batchCount: "1"
   };
+}
+
+function imageModelSelectionPatch(data = {}, model) {
+  return {
+    model,
+    aspectRatio: normalizeImageModelAspectRatio(data.aspectRatio, model)
+  };
+}
+
+function imageModelAspectRatioOptions(model) {
+  return [imageModelAutoAspectRatio, ...imageModelSupportedAspectRatios(model)];
+}
+
+function imageModelSupportedAspectRatios(model) {
+  return isOpenAiImageModel(model) ? openAiImageAspectRatios : nanoImageAspectRatios;
+}
+
+function normalizeImageModelAspectRatio(value, model) {
+  if (isAutoImageAspectRatio(value)) return imageModelAutoAspectRatio;
+  const ratio = extractAspectRatio(value);
+  return imageModelSupportedAspectRatios(model).includes(ratio) ? ratio : "21:9";
+}
+
+function isAutoImageAspectRatio(value) {
+  return String(value || "").toLowerCase() === "auto";
+}
+
+function isOpenAiImageModel(model) {
+  return String(model || "").toLowerCase().includes("openai");
 }
 
 function isWanFunControlModel(model) {
@@ -5491,6 +5690,11 @@ function isDepthAnythingModel(model) {
 
 function isPatinaModel(model) {
   return String(model || "").toLowerCase().includes("patina");
+}
+
+function isUtilityColorIdMatteModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("color") && normalized.includes("matte");
 }
 
 function isUtilitySam3ImageModel(model) {
@@ -5559,6 +5763,7 @@ function utilityInputPortIds(mode, imageModel = utilityImageModelNames.dwpose, v
 
 function normalizedUtilityImageModelName(model) {
   const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("color") && normalized.includes("matte")) return utilityImageModelNames.colorIdMatte;
   if (normalized.includes("sam") && normalized.includes("image")) return utilityImageModelNames.sam3Image;
   if (normalized.includes("birefnet")) return utilityImageModelNames.birefnetImage;
   if (normalized.includes("depth") || normalized.includes("anything")) return utilityImageModelNames.depthAnything;
@@ -5798,13 +6003,18 @@ async function runCameraQwenEdit({ node, incoming, projectId, projectName }) {
 async function runUtilityImageGeneration({ node, prompt, incoming, projectId, projectName }) {
   const imageUrl = connectedAssetUrls(incoming.imageIn).at(-1);
   if (!imageUrl) throw new Error("Connect an image to the Utility node.");
+  const model = normalizedUtilityImageModelName(node.data.utilityImageModel);
+
+  if (isUtilityColorIdMatteModel(model)) {
+    return [await runColorIdMatteUtilityImage({ node, imageUrl, projectId, projectName })];
+  }
 
   const { response, data } = await fetchJsonApi("/api/node/utility-image", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt,
-      model: normalizedUtilityImageModelName(node.data.utilityImageModel),
+      model,
       imageUrls: [imageUrl],
       dwposeDrawMode: node.data.dwposeDrawMode || "body-pose",
       patinaMaps: patinaMapsForData(node.data),
@@ -5828,6 +6038,45 @@ async function runUtilityImageGeneration({ node, prompt, incoming, projectId, pr
     seed: data.seed,
     cost: data.cost
   }));
+}
+
+async function runColorIdMatteUtilityImage({ node, imageUrl, projectId, projectName }) {
+  const color = normalizeColorIdMatteColor(node.data.colorIdMatteColor);
+  if (!color) throw new Error("Pick a color in the Utility node.");
+
+  const tolerance = colorIdMatteTolerance(node.data.colorIdMatteTolerance);
+  const sampleRadius = colorIdMatteSampleRadius(node.data.colorIdMatteSampleRadius);
+  const invert = Boolean(node.data.colorIdMatteInvert);
+  const mask = await createColorIdMatteBlob(imageUrl, color, { tolerance, invert });
+  const file = new File([mask.blob], "color-id-matte.png", { type: "image/png" });
+  const form = new FormData();
+  form.append("asset", file);
+  form.append("sourceImageUrl", imageUrl);
+  form.append("selectedColor", rgbToHex(color));
+  form.append("tolerance", String(tolerance));
+  form.append("sampleRadius", String(sampleRadius));
+  form.append("invert", invert ? "true" : "false");
+  form.append("matchedPixels", String(mask.matchedPixels));
+  form.append("width", String(mask.width));
+  form.append("height", String(mask.height));
+  form.append("projectId", projectId || "");
+  form.append("projectName", projectName || "");
+  form.append("nodeId", node.id);
+  form.append("nodeTitle", node.data.title || "");
+
+  const { response, data } = await fetchJsonApi("/api/node/color-id-matte", {
+    method: "POST",
+    body: form
+  }, "Color ID matte");
+  if (!response.ok) throw new Error(data.error || "Color ID matte failed.");
+
+  return {
+    url: data.image.localUrl,
+    type: "image",
+    label: data.image.label || "Color ID Matte",
+    text: data.text || "",
+    cost: data.cost
+  };
 }
 
 async function fetchJsonApi(path, options, label) {
@@ -5862,6 +6111,8 @@ async function fetchJsonApi(path, options, label) {
         ? "utilityImage"
         : path.includes("utility-video")
           ? "utilityVideo"
+          : path.includes("color-id-matte")
+            ? "colorIdMatte"
           : path.includes("composer-frame")
             ? "composerFrame"
             : path.includes("composer-poses")
@@ -5918,14 +6169,15 @@ function canRetryLocalApi(path) {
   return isLocalhost && window.location.port !== "3333";
 }
 
-async function runImageModelGeneration({ node, prompt, imagePromptItems, projectId, projectName, index }) {
+async function runImageModelGeneration({ node, prompt, aspectRatio, imagePromptItems, projectId, projectName, index }) {
   const { response, data } = await fetchJsonApi("/api/node/generate-image", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt,
       model: node.data.model,
-      aspectRatio: node.data.aspectRatio,
+      aspectRatio: aspectRatio || node.data.aspectRatio,
+      requestedAspectRatio: node.data.aspectRatio,
       resolution: node.data.resolution,
       imagePromptUrls: imagePromptItems.map((item) => item.url),
       imagePromptLabels: imagePromptItems.map((item) => item.label),
@@ -6167,6 +6419,213 @@ function connectedImagePromptItems(items = []) {
     .filter(Boolean);
 }
 
+async function resolveImageModelAspectRatio(node, incoming = {}) {
+  const configuredAspectRatio = node.data.aspectRatio || "21:9";
+  if (!isAutoImageAspectRatio(configuredAspectRatio)) {
+    return normalizeImageModelAspectRatio(configuredAspectRatio, node.data.model);
+  }
+
+  const imageUrl = imageModelAutoAspectInputUrls(incoming)[0];
+  if (!imageUrl) {
+    throw new Error("Auto aspect ratio needs a connected image.");
+  }
+
+  const dimensions = await imageDimensionsFromUrl(imageUrl);
+  if (!dimensions) {
+    throw new Error("Could not read the connected image size for Auto aspect ratio.");
+  }
+
+  return closestAspectRatio(dimensions.width / Math.max(1, dimensions.height), imageModelSupportedAspectRatios(node.data.model));
+}
+
+function imageModelAutoAspectInputUrls(incoming = {}) {
+  return ["imagePromptIn", "cameraIn", "transferIn"]
+    .flatMap((portId) => incoming[portId] || [])
+    .map(({ source, edge }) => {
+      if (!source?.data?.resultUrl) return "";
+      return previewMediaType(source, edge) === "image" ? source.data.resultUrl : "";
+    })
+    .filter(Boolean);
+}
+
+async function imageDimensionsFromUrl(url) {
+  try {
+    const image = await loadCanvasImage(url);
+    const width = image.naturalWidth || image.width;
+    const height = image.naturalHeight || image.height;
+    return width > 0 && height > 0 ? { width, height } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function createColorIdMatteBlob(imageUrl, color, { tolerance = 0, invert = false } = {}) {
+  const image = await loadCanvasImage(imageUrl);
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  const sourceCanvas = document.createElement("canvas");
+  const sourceImageData = drawColorIdMattePickerCanvas(sourceCanvas, image);
+  const mask = colorIdMatteImageData(sourceImageData, color, tolerance, invert);
+
+  const maskCanvas = document.createElement("canvas");
+  maskCanvas.width = width;
+  maskCanvas.height = height;
+  maskCanvas.getContext("2d").putImageData(mask.imageData, 0, 0);
+
+  return new Promise((resolve, reject) => {
+    maskCanvas.toBlob((blob) => {
+      if (blob) {
+        resolve({
+          blob,
+          width,
+          height,
+          matchedPixels: mask.matchedPixels
+        });
+      } else {
+        reject(new Error("Could not create Color ID matte."));
+      }
+    }, "image/png");
+  });
+}
+
+function drawColorIdMattePickerCanvas(canvas, image) {
+  const width = image.naturalWidth || image.width;
+  const height = image.naturalHeight || image.height;
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.clearRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  return context.getImageData(0, 0, width, height);
+}
+
+function renderColorIdMattePickerPreview(context, sourceImageData, color, tolerance, invert, view = "overlay") {
+  if (view === "matte" && color) {
+    context.putImageData(colorIdMatteImageData(sourceImageData, color, tolerance, invert).imageData, 0, 0);
+    return;
+  }
+
+  if (view === "rgb") {
+    context.putImageData(sourceImageData, 0, 0);
+    return;
+  }
+
+  const preview = new ImageData(new Uint8ClampedArray(sourceImageData.data), sourceImageData.width, sourceImageData.height);
+  if (color) {
+    const { data } = preview;
+    const source = sourceImageData.data;
+    for (let index = 0; index < source.length; index += 4) {
+      const matches = colorMatches(source, index, color, tolerance);
+      if (matches !== invert) {
+        data[index] = Math.round(source[index] * 0.35 + 221 * 0.65);
+        data[index + 1] = Math.round(source[index + 1] * 0.35 + 198 * 0.65);
+        data[index + 2] = Math.round(source[index + 2] * 0.35 + 49 * 0.65);
+        data[index + 3] = 255;
+      }
+    }
+  }
+  context.putImageData(preview, 0, 0);
+}
+
+function colorIdMatteImageData(sourceImageData, color, tolerance, invert) {
+  const output = new ImageData(sourceImageData.width, sourceImageData.height);
+  const source = sourceImageData.data;
+  const target = output.data;
+  let matchedPixels = 0;
+
+  for (let index = 0; index < source.length; index += 4) {
+    const matches = colorMatches(source, index, color, tolerance);
+    const selected = matches !== invert;
+    if (matches) matchedPixels += 1;
+    const value = selected ? 255 : 0;
+    target[index] = value;
+    target[index + 1] = value;
+    target[index + 2] = value;
+    target[index + 3] = 255;
+  }
+
+  return { imageData: output, matchedPixels };
+}
+
+function colorMatches(data, index, color, tolerance) {
+  if (data[index + 3] === 0) return false;
+  return (
+    Math.abs(data[index] - color.r) <= tolerance &&
+    Math.abs(data[index + 1] - color.g) <= tolerance &&
+    Math.abs(data[index + 2] - color.b) <= tolerance
+  );
+}
+
+function averageColorFromImageData(imageData, x, y, radius = 0) {
+  const minX = Math.max(0, x - radius);
+  const maxX = Math.min(imageData.width - 1, x + radius);
+  const minY = Math.max(0, y - radius);
+  const maxY = Math.min(imageData.height - 1, y + radius);
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let count = 0;
+
+  for (let sampleY = minY; sampleY <= maxY; sampleY += 1) {
+    for (let sampleX = minX; sampleX <= maxX; sampleX += 1) {
+      const index = (sampleY * imageData.width + sampleX) * 4;
+      if (imageData.data[index + 3] === 0) continue;
+      r += imageData.data[index];
+      g += imageData.data[index + 1];
+      b += imageData.data[index + 2];
+      count += 1;
+    }
+  }
+
+  if (!count) return null;
+  return {
+    r: Math.round(r / count),
+    g: Math.round(g / count),
+    b: Math.round(b / count)
+  };
+}
+
+function normalizeColorIdMatteColor(value) {
+  if (typeof value === "string") return colorFromHex(value);
+  if (!value || typeof value !== "object") return null;
+  const color = {
+    r: clampColorChannel(value.r),
+    g: clampColorChannel(value.g),
+    b: clampColorChannel(value.b)
+  };
+  return color.r === null || color.g === null || color.b === null ? null : color;
+}
+
+function colorFromHex(value) {
+  const match = String(value || "").trim().match(/^#?([0-9a-f]{6})$/i);
+  if (!match) return null;
+  const hex = match[1];
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16)
+  };
+}
+
+function rgbToHex(color) {
+  return `#${[color.r, color.g, color.b].map((channel) => (clampColorChannel(channel) ?? 0).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function clampColorChannel(value) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) ? Math.min(255, Math.max(0, number)) : null;
+}
+
+function colorIdMatteTolerance(value) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) ? Math.min(96, Math.max(0, number)) : 0;
+}
+
+function colorIdMatteSampleRadius(value) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) ? Math.min(3, Math.max(0, number)) : 0;
+}
+
 function buildEffectiveImagePrompt(prompt, items = [], aspectRatio) {
   const hasTransferReference = items.some(({ source }) => source.type === "transfer" && source.data.resultUrl);
   const promptInstructions = items
@@ -6242,6 +6701,22 @@ function sourceLabel(source) {
 
 function extractAspectRatio(value) {
   return String(value || "").match(/\d+:\d+/)?.[0] || "";
+}
+
+function closestAspectRatio(ratio, options = []) {
+  const normalizedRatio = Number(ratio);
+  if (!Number.isFinite(normalizedRatio) || normalizedRatio <= 0) return options[0] || "21:9";
+
+  return options.reduce((closest, option) => {
+    const optionRatio = aspectRatioNumber(option);
+    const closestRatio = aspectRatioNumber(closest);
+    return Math.abs(Math.log(optionRatio / normalizedRatio)) < Math.abs(Math.log(closestRatio / normalizedRatio)) ? option : closest;
+  }, options[0] || "21:9");
+}
+
+function aspectRatioNumber(value) {
+  const [width = 21, height = 9] = extractAspectRatio(value).split(":").map(Number);
+  return width > 0 && height > 0 ? width / height : 21 / 9;
 }
 
 async function createTransferCollageBlob(images) {
@@ -7330,7 +7805,27 @@ function normalizeCurrentNode(node) {
     };
   }
 
+  if (nextNode.type === "imageModel") {
+    return {
+      ...nextNode,
+      data: normalizeImageModelData(data)
+    };
+  }
+
   return nextNode;
+}
+
+function normalizeImageModelData(data = {}) {
+  const model = data.model || "Nano Banana Pro";
+  return {
+    ...data,
+    title: data.title || "Image Model",
+    model,
+    prompt: data.prompt || "",
+    aspectRatio: normalizeImageModelAspectRatio(data.aspectRatio, model),
+    resolution: data.resolution || "2K",
+    batchCount: data.batchCount || "1"
+  };
 }
 
 function normalizeComposerData(data = {}) {
@@ -7361,6 +7856,10 @@ function normalizeUtilityData(data = {}) {
     patinaMaps: patinaMapsForData(data),
     patinaOutputFormat: data.patinaOutputFormat || "png",
     patinaSeed: data.patinaSeed || "",
+    colorIdMatteColor: normalizeColorIdMatteColor(data.colorIdMatteColor),
+    colorIdMatteTolerance: colorIdMatteTolerance(data.colorIdMatteTolerance),
+    colorIdMatteSampleRadius: colorIdMatteSampleRadius(data.colorIdMatteSampleRadius),
+    colorIdMatteInvert: Boolean(data.colorIdMatteInvert),
     sam3VideoDetectionThreshold: data.sam3VideoDetectionThreshold ?? 0.5,
     batchCount: data.batchCount || "1",
     preprocessVideo: data.preprocessVideo !== false,
