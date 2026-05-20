@@ -16,6 +16,7 @@ import {
   MonitorPlay,
   ImagePlus,
   Lock,
+  Minus,
   PanelLeftClose,
   PanelLeftOpen,
   Palette,
@@ -408,6 +409,7 @@ const patinaMapOptions = [
 ];
 const utilityVideoModelNames = {
   wanFunControl: "Wan Fun Control",
+  extractFrame: "Extract Frame",
   sam3Video: "SAM 3 Video",
   voidVideoInpainting: "VOID Video Inpainting",
   birefnetVideo: "BiRefNet Video",
@@ -458,6 +460,7 @@ const utilityModelDescriptions = {
   [utilityImageModelNames.sam3Image]: "Segments prompted objects in an image and returns the masked result.",
   [utilityImageModelNames.birefnetImage]: "Removes an image background with BiRefNet and can optionally return the mask.",
   [utilityVideoModelNames.wanFunControl]: "Uses a control video, optional reference image, and prompt to guide a new video.",
+  [utilityVideoModelNames.extractFrame]: "Captures the current frame from a connected video and outputs it as a still image.",
   [utilityVideoModelNames.sam3Video]: "Segments prompted objects through a video and returns a mask video.",
   [utilityVideoModelNames.voidVideoInpainting]: "Removes an object from a video and inpaints the affected background over time.",
   [utilityVideoModelNames.birefnetVideo]: "Removes a video background with BiRefNet and can optionally return the mask video.",
@@ -592,6 +595,24 @@ export default function NodeEditor({ active = true } = {}) {
       }
 
       if (event.target.closest?.("input, textarea, select")) return;
+
+      if (commandKey && (key === "=" || key === "+")) {
+        event.preventDefault();
+        zoomViewportAtCanvasCenter(1.16);
+        return;
+      }
+
+      if (commandKey && key === "-") {
+        event.preventDefault();
+        zoomViewportAtCanvasCenter(1 / 1.16);
+        return;
+      }
+
+      if (commandKey && key === "0") {
+        event.preventDefault();
+        resetViewportZoom();
+        return;
+      }
 
       if (commandKey && key === "z") {
         event.preventDefault();
@@ -1440,21 +1461,8 @@ export default function NodeEditor({ active = true } = {}) {
       y: event.clientY - rect.top
     };
 
-    if (event.ctrlKey || event.metaKey) {
-      setViewport((current) => {
-        const zoomFactor = Math.exp(-event.deltaY * 0.006);
-        const nextScale = clamp(current.scale * zoomFactor, minZoom, maxZoom);
-        const scenePoint = {
-          x: (pointer.x - current.x) / current.scale,
-          y: (pointer.y - current.y) / current.scale
-        };
-
-        return {
-          x: pointer.x - scenePoint.x * nextScale,
-          y: pointer.y - scenePoint.y * nextScale,
-          scale: nextScale
-        };
-      });
+    if (event.ctrlKey || event.metaKey || event.altKey) {
+      zoomViewportAtPoint(pointer, Math.exp(-event.deltaY * 0.006));
       return;
     }
 
@@ -1463,6 +1471,61 @@ export default function NodeEditor({ active = true } = {}) {
       x: current.x - event.deltaX,
       y: current.y - event.deltaY
     }));
+  }
+
+  function zoomViewportAtCanvasCenter(zoomFactor) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    zoomViewportAtPoint(
+      {
+        x: rect.width / 2,
+        y: rect.height / 2
+      },
+      zoomFactor
+    );
+  }
+
+  function zoomViewportAtPoint(pointer, zoomFactor) {
+    setViewport((current) => {
+      const nextScale = clamp(current.scale * zoomFactor, minZoom, maxZoom);
+      if (nextScale === current.scale) return current;
+      const scenePoint = {
+        x: (pointer.x - current.x) / current.scale,
+        y: (pointer.y - current.y) / current.scale
+      };
+
+      return {
+        x: pointer.x - scenePoint.x * nextScale,
+        y: pointer.y - scenePoint.y * nextScale,
+        scale: nextScale
+      };
+    });
+  }
+
+  function resetViewportZoom() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const pointer = {
+      x: rect.width / 2,
+      y: rect.height / 2
+    };
+
+    setViewport((current) => {
+      const nextScale = 1;
+      const scenePoint = {
+        x: (pointer.x - current.x) / current.scale,
+        y: (pointer.y - current.y) / current.scale
+      };
+
+      return {
+        x: pointer.x - scenePoint.x * nextScale,
+        y: pointer.y - scenePoint.y * nextScale,
+        scale: nextScale
+      };
+    });
   }
 
   function screenToScene(clientX, clientY) {
@@ -2056,11 +2119,13 @@ export default function NodeEditor({ active = true } = {}) {
       (currentNode.type === "videoModel" && isSam3VideoModel(currentNode.data.model)) ||
       (currentNode.type === "utility" &&
         utilityMode(currentNode) === "video" &&
-        (isUtilitySam3VideoModel(currentNode.data.utilityVideoModel) || isUtilityBirefnetVideoModel(currentNode.data.utilityVideoModel)));
+        (isUtilitySam3VideoModel(currentNode.data.utilityVideoModel) ||
+          isUtilityBirefnetVideoModel(currentNode.data.utilityVideoModel) ||
+          isUtilityExtractFrameVideoModel(currentNode.data.utilityVideoModel)));
     const batchCount = isSingleRunSegmentation ? 1 : nodeBatchCount(currentNode);
     const previousImageResults = existingResultItemsForNode(currentNode, "image");
     const previousVideoResults = existingResultItemsForNode(currentNode, "video");
-    const previousUtilityResults = existingResultItemsForNode(currentNode, utilityMode(currentNode) === "video" ? "video" : "image");
+    const previousUtilityResults = existingResultItemsForNode(currentNode, currentNode.type === "utility" ? utilityOutputType(currentNode) : "image");
 
     try {
       const runningPatch =
@@ -2121,6 +2186,7 @@ export default function NodeEditor({ active = true } = {}) {
           return { status: "complete" };
         }
 
+        const utilityResultType = utilityOutputType(currentNode);
         const runs = Array.from({ length: batchCount }, (_, index) =>
           runUtilityVideoGeneration({
             node: currentNode,
@@ -2137,7 +2203,7 @@ export default function NodeEditor({ active = true } = {}) {
           .flatMap((item) => (Array.isArray(item.value) ? item.value : [item.value]));
         const failures = settled.filter((item) => item.status === "rejected");
         if (!successes.length) throw new Error(failures[0]?.reason?.message || "Utility video failed.");
-        const resultItems = appendResultItems(previousUtilityResults, successes, "video");
+        const resultItems = appendResultItems(previousUtilityResults, successes, utilityResultType);
         const firstNewIndex = Math.max(0, resultItems.length - successes.length);
 
         updateNode(currentNode.id, {
@@ -2145,9 +2211,9 @@ export default function NodeEditor({ active = true } = {}) {
           resultUrl: successes[0].url,
           resultItems,
           selectedResultIndex: firstNewIndex,
-          resultText: "",
-          resultType: "video",
-          error: failures.length ? nodeBatchStatusMessage("video", batchCount, successes.length, failures) : ""
+          resultText: successes.map((item) => item.text).filter(Boolean).join("\n\n"),
+          resultType: utilityResultType,
+          error: failures.length ? nodeBatchStatusMessage(utilityResultType, batchCount, successes.length, failures) : ""
         });
         return { status: "complete" };
       }
@@ -2484,7 +2550,17 @@ export default function NodeEditor({ active = true } = {}) {
             })}
           </div>
         )}
-        <div className="zoom-readout">{Math.round(viewport.scale * 100)}%</div>
+        <div className="zoom-controls" onPointerDown={(event) => event.stopPropagation()}>
+          <button type="button" onClick={() => zoomViewportAtCanvasCenter(1 / 1.16)} title="Zoom out" aria-label="Zoom out">
+            <Minus size={14} />
+          </button>
+          <button type="button" onClick={resetViewportZoom} title="Reset zoom" aria-label="Reset zoom" className="zoom-readout">
+            {Math.round(viewport.scale * 100)}%
+          </button>
+          <button type="button" onClick={() => zoomViewportAtCanvasCenter(1.16)} title="Zoom in" aria-label="Zoom in">
+            <Plus size={14} />
+          </button>
+        </div>
       </div>
     </section>
   );
@@ -4309,13 +4385,15 @@ function NodeBody({
     const isVoidVideo = isUtilityVoidVideoModel(utilityVideoModel);
     const isBirefnetVideo = isUtilityBirefnetVideoModel(utilityVideoModel);
     const isRifeVideo = isUtilityRifeVideoModel(utilityVideoModel);
+    const isExtractFrameVideo = isUtilityExtractFrameVideoModel(utilityVideoModel);
     const isBytedanceUpscaler = isUtilityBytedanceUpscalerModel(utilityVideoModel);
     const isTopazUpscaler = isUtilityTopazUpscalerModel(utilityVideoModel);
     const isVideoUpscaler = isUtilityVideoUpscalerModel(utilityVideoModel);
+    const utilityOutputMediaType = isVideoMode ? utilityVideoOutputType(utilityVideoModel) : "image";
     const utilityOutputPort = {
       ...config.output[0],
-      label: isVideoMode ? "Video output" : "Image output",
-      color: isVideoMode ? portColors.video : portColors.image
+      label: utilityOutputMediaType === "video" ? "Video output" : "Image output",
+      color: utilityOutputMediaType === "video" ? portColors.video : portColors.image
     };
     const promptValue = resolvedPromptText(incoming.promptIn) || node.data.prompt || "";
     const promptConnected = Boolean(resolvedPromptText(incoming.promptIn));
@@ -4326,9 +4404,9 @@ function NodeBody({
       : utilityInputPortIds("image", utilityImageModel, utilityVideoModel)
           .map((portId) => config.input.find((port) => port.id === portId))
           .filter(Boolean);
-    const resultType = node.data.resultType || mode;
+    const resultType = node.data.resultType || utilityOutputMediaType;
     const canRun = isVideoMode
-      ? Boolean(incoming.referenceVideoIn?.length) && (isBirefnetVideo || isRifeVideo || isVideoUpscaler || Boolean(promptValue.trim()))
+      ? Boolean(incoming.referenceVideoIn?.length) && (isBirefnetVideo || isRifeVideo || isExtractFrameVideo || isVideoUpscaler || Boolean(promptValue.trim()))
       : Boolean(incoming.imageIn?.length) && (!isSam3Image || Boolean(promptValue.trim())) && (!isColorIdMatte || Boolean(normalizeColorIdMatteColor(node.data.colorIdMatteColor)));
     const utilityRunLabel = isVideoMode
       ? isSam3Video
@@ -4339,11 +4417,13 @@ function NodeBody({
             ? "Run BiRefNet Video"
             : isRifeVideo
               ? "Run RIFE"
-              : isBytedanceUpscaler
-                ? "Run Bytedance Upscale"
-                : isTopazUpscaler
-                  ? "Run Topaz Upscale"
-                  : "Run Wan Fun Control"
+              : isExtractFrameVideo
+                ? "Extract Frame"
+                : isBytedanceUpscaler
+                  ? "Run Bytedance Upscale"
+                  : isTopazUpscaler
+                    ? "Run Topaz Upscale"
+                    : "Run Wan Fun Control"
       : isColorIdMatte
         ? "Run Color Matte"
         : isSam3Image
@@ -4359,13 +4439,14 @@ function NodeBody({
 
     function setMode(nextMode) {
       if (mode === nextMode) return;
+      const nextResultType = nextMode === "video" ? utilityVideoOutputType(utilityVideoModel) : "image";
       onUpdate(node.id, {
         utilityMode: nextMode,
         resultUrl: "",
         resultItems: [],
         selectedResultIndex: 0,
         resultText: "",
-        resultType: nextMode,
+        resultType: nextResultType,
         status: "ready",
         error: ""
       });
@@ -4422,8 +4503,9 @@ function NodeBody({
           {isVideoMode ? (
             <>
               <NodeRow label="Model">
-                <select value={utilityVideoModel} onChange={(event) => onUpdate(node.id, { utilityVideoModel: event.target.value, resultUrl: "", resultItems: [], resultType: "video", error: "" })}>
+                <select value={utilityVideoModel} onChange={(event) => onUpdate(node.id, { utilityVideoModel: event.target.value, resultUrl: "", resultItems: [], resultType: utilityVideoOutputType(event.target.value), error: "" })}>
                   <option>{utilityVideoModelNames.wanFunControl}</option>
+                  <option>{utilityVideoModelNames.extractFrame}</option>
                   <option>{utilityVideoModelNames.voidVideoInpainting}</option>
                   <option>{utilityVideoModelNames.birefnetVideo}</option>
                   <option>{utilityVideoModelNames.rifeVideo}</option>
@@ -4432,12 +4514,12 @@ function NodeBody({
                   <option>{utilityVideoModelNames.sam3Video}</option>
                 </select>
               </NodeRow>
-              {!isBirefnetVideo && !isRifeVideo && !isVideoUpscaler && (
+              {!isBirefnetVideo && !isRifeVideo && !isExtractFrameVideo && !isVideoUpscaler && (
                 <NodeRow label="Prompt" inputPort={settingsOpen ? promptPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
                   <textarea className={promptConnected ? "connected-field" : ""} value={promptValue} readOnly={promptConnected} onChange={(event) => onUpdate(node.id, { prompt: event.target.value })} />
                 </NodeRow>
               )}
-              {!isSam3Video && !isBirefnetVideo && !isRifeVideo && !isVideoUpscaler && (
+              {!isSam3Video && !isBirefnetVideo && !isRifeVideo && !isExtractFrameVideo && !isVideoUpscaler && (
                 <NodeRow label="Generations">
                   <select value={node.data.batchCount || "1"} onChange={(event) => onUpdate(node.id, { batchCount: event.target.value })}>
                     {batchOptions.map((option) => (
@@ -4448,13 +4530,15 @@ function NodeBody({
                   </select>
                 </NodeRow>
               )}
-              <NodeRow label={isSam3Video || isBirefnetVideo || isRifeVideo || isVideoUpscaler ? "Video" : isVoidVideo ? "Source Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
+              <NodeRow label={isSam3Video || isBirefnetVideo || isRifeVideo || isExtractFrameVideo || isVideoUpscaler ? "Video" : isVoidVideo ? "Source Video" : "Control Video"} inputPort={settingsOpen ? referenceVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
                 <button className={incoming.referenceVideoIn?.length ? "connected-field" : ""}>{connectedSummary(incoming.referenceVideoIn, "Add video")}</button>
               </NodeRow>
               {isSam3Video ? (
                 <NodeRow label="Threshold">
                   <input type="number" min="0" max="1" step="0.05" value={node.data.sam3VideoDetectionThreshold ?? 0.5} onChange={(event) => onUpdate(node.id, { sam3VideoDetectionThreshold: event.target.value })} />
                 </NodeRow>
+              ) : isExtractFrameVideo ? (
+                <ExtractFrameControls videoUrl={connectedAssetUrls(incoming.referenceVideoIn).at(-1)} node={node} onUpdate={onUpdate} />
               ) : isVoidVideo ? (
                 <>
                   <NodeRow label="Mask Video" inputPort={settingsOpen ? maskVideoPort : null} node={node} onConnectStart={onConnectStart} onDisconnectInput={onDisconnectInput} connectedPortKeys={connectedPortKeys}>
@@ -5365,6 +5449,91 @@ function ColorIdMattePicker({ imageUrl, node, onUpdate }) {
   );
 }
 
+function ExtractFrameControls({ videoUrl, node, onUpdate }) {
+  const videoRef = React.useRef(null);
+  const [duration, setDuration] = React.useState(0);
+  const selectedTime = Math.max(0, finiteNumber(node.data.extractFrameTime, 0));
+  const selectedFormat = node.data.extractFrameFormat === "jpeg" ? "jpeg" : "png";
+
+  React.useEffect(() => {
+    setDuration(0);
+  }, [videoUrl]);
+
+  function commitTime(value) {
+    const nextTime = Math.round(Math.max(0, Number(value) || 0) * 100) / 100;
+    if (Math.abs(nextTime - selectedTime) < 0.005) return;
+    onUpdate(node.id, {
+      extractFrameTime: String(nextTime),
+      error: ""
+    });
+  }
+
+  function handleLoadedMetadata(event) {
+    const video = event.currentTarget;
+    const nextDuration = Number.isFinite(video.duration) ? Math.max(0, video.duration) : 0;
+    setDuration(nextDuration);
+    const clampedTime = nextDuration ? clamp(selectedTime, 0, Math.max(0, nextDuration - 0.01)) : selectedTime;
+    if (Math.abs(clampedTime - selectedTime) >= 0.005) {
+      commitTime(clampedTime);
+    }
+    if (clampedTime > 0 && Math.abs(video.currentTime - clampedTime) > 0.05) {
+      video.currentTime = clampedTime;
+    }
+  }
+
+  function handleTimeInput(event) {
+    const nextTime = Math.max(0, Number(event.target.value) || 0);
+    commitTime(nextTime);
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.duration)) {
+      video.currentTime = clamp(nextTime, 0, Math.max(0, video.duration - 0.01));
+    }
+  }
+
+  return (
+    <>
+      <NodeRow label="Preview">
+        <div className={`extract-frame-preview ${videoUrl ? "" : "empty"}`} onPointerDown={(event) => event.stopPropagation()}>
+          {videoUrl ? (
+            <video
+              ref={videoRef}
+              src={videoUrl}
+              controls
+              muted
+              preload="metadata"
+              onLoadedMetadata={handleLoadedMetadata}
+              onSeeked={(event) => commitTime(event.currentTarget.currentTime)}
+              onTimeUpdate={(event) => commitTime(event.currentTarget.currentTime)}
+            />
+          ) : (
+            <span>No video</span>
+          )}
+        </div>
+      </NodeRow>
+      <NodeRow label="Time">
+        <div className="extract-frame-time">
+          <input type="number" min="0" step="0.01" value={node.data.extractFrameTime ?? 0} onChange={handleTimeInput} />
+          <span>{duration ? `/ ${formatFrameTimeDisplay(duration)}` : "sec"}</span>
+        </div>
+      </NodeRow>
+      <NodeRow label="Format">
+        <select value={selectedFormat} onChange={(event) => onUpdate(node.id, { extractFrameFormat: event.target.value, error: "" })}>
+          <option value="png">PNG</option>
+          <option value="jpeg">JPEG</option>
+        </select>
+      </NodeRow>
+    </>
+  );
+}
+
+function formatFrameTimeDisplay(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds - minutes * 60;
+  if (minutes > 0) return `${minutes}:${remainder.toFixed(2).padStart(5, "0")}`;
+  return `${remainder.toFixed(2)}s`;
+}
+
 function NodeRow({ label, children, inputPort, node, onConnectStart, onDisconnectInput, connectedPortKeys }) {
   return (
     <div className={`node-row ${inputPort ? "has-port" : ""}`}>
@@ -5719,6 +5888,11 @@ function isUtilityRifeVideoModel(model) {
   return String(model || "").toLowerCase().includes("rife");
 }
 
+function isUtilityExtractFrameVideoModel(model) {
+  const normalized = String(model || "").toLowerCase();
+  return normalized.includes("extract") || normalized.includes("current frame") || normalized.includes("video frame");
+}
+
 function isUtilityBytedanceUpscalerModel(model) {
   const normalized = String(model || "").toLowerCase();
   return normalized.includes("bytedance") && normalized.includes("upscal");
@@ -5742,6 +5916,7 @@ function utilityMode(node) {
 }
 
 function utilityOutputType(node) {
+  if (utilityMode(node) === "video" && isUtilityExtractFrameVideoModel(node?.data?.utilityVideoModel)) return "image";
   return utilityMode(node);
 }
 
@@ -5756,6 +5931,7 @@ function utilityInputPortIds(mode, imageModel = utilityImageModelNames.dwpose, v
 
   if (isUtilityBirefnetVideoModel(videoModel)) return ["referenceVideoIn"];
   if (isUtilityRifeVideoModel(videoModel)) return ["referenceVideoIn"];
+  if (isUtilityExtractFrameVideoModel(videoModel)) return ["referenceVideoIn"];
   if (isUtilityVideoUpscalerModel(videoModel)) return ["referenceVideoIn"];
   if (isUtilityVoidVideoModel(videoModel)) return ["promptIn", "referenceVideoIn", "maskVideoIn"];
   return isUtilitySam3VideoModel(videoModel) ? ["promptIn", "referenceVideoIn"] : ["promptIn", "referenceImageIn", "referenceVideoIn"];
@@ -5776,10 +5952,15 @@ function normalizedUtilityVideoModelName(model) {
   if (normalized.includes("sam") && normalized.includes("video")) return utilityVideoModelNames.sam3Video;
   if (normalized.includes("birefnet")) return utilityVideoModelNames.birefnetVideo;
   if (normalized.includes("rife")) return utilityVideoModelNames.rifeVideo;
+  if (isUtilityExtractFrameVideoModel(normalized)) return utilityVideoModelNames.extractFrame;
   if (normalized.includes("bytedance") && normalized.includes("upscal")) return utilityVideoModelNames.bytedanceUpscaler;
   if (normalized.includes("topaz")) return utilityVideoModelNames.topazUpscaler;
   if (normalized.includes("void") || normalized.includes("inpaint")) return utilityVideoModelNames.voidVideoInpainting;
   return utilityVideoModelNames.wanFunControl;
+}
+
+function utilityVideoOutputType(model) {
+  return isUtilityExtractFrameVideoModel(model) ? "image" : "video";
 }
 
 function utilityModelDescription(model) {
@@ -6111,6 +6292,8 @@ async function fetchJsonApi(path, options, label) {
         ? "utilityImage"
         : path.includes("utility-video")
           ? "utilityVideo"
+          : path.includes("extract-video-frame")
+            ? "extractVideoFrame"
           : path.includes("color-id-matte")
             ? "colorIdMatte"
           : path.includes("composer-frame")
@@ -6246,15 +6429,20 @@ async function runVideoModelGeneration({ node, prompt, incoming, projectId, proj
 }
 
 async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, projectName, index }) {
+  const model = normalizedUtilityVideoModelName(node.data.utilityVideoModel || utilityVideoModelNames.wanFunControl);
   const { response, data } = await fetchJsonApi("/api/node/utility-video", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt,
-      model: node.data.utilityVideoModel || utilityVideoModelNames.wanFunControl,
+      model,
       referenceImageUrls: connectedAssetUrls(incoming.referenceImageIn),
       referenceVideoUrls: connectedAssetUrls(incoming.referenceVideoIn),
       maskVideoUrls: connectedAssetUrls(incoming.maskVideoIn),
+      extractFrame: {
+        frameTime: node.data.extractFrameTime ?? 0,
+        format: node.data.extractFrameFormat || "png"
+      },
       wanFunControl: {
         preprocessVideo: node.data.preprocessVideo !== false,
         preprocessType: node.data.preprocessType || "depth",
@@ -6326,6 +6514,16 @@ async function runUtilityVideoGeneration({ node, prompt, incoming, projectId, pr
     })
   }, "Utility video");
   if (!response.ok) throw new Error(`Run ${index + 1}: ${data.error || "Utility video failed."}`);
+
+  if (data.image?.localUrl) {
+    return {
+      url: data.image.localUrl,
+      type: "image",
+      label: data.image.label || data.modelName || `Frame ${index + 1}`,
+      text: data.text || "",
+      cost: data.cost
+    };
+  }
 
   if (Array.isArray(data.videos) && data.videos.length) {
     return data.videos
@@ -7845,13 +8043,16 @@ function normalizeComposerData(data = {}) {
 }
 
 function normalizeUtilityData(data = {}) {
+  const utilityModeValue = data.utilityMode === "image" ? "image" : "video";
+  const utilityVideoModel = normalizedUtilityVideoModelName(data.utilityVideoModel);
   return {
     ...data,
     title: data.title || "Utility",
-    utilityMode: data.utilityMode === "image" ? "image" : "video",
+    utilityMode: utilityModeValue,
     model: videoModelNames.wanFunControl,
     utilityImageModel: normalizedUtilityImageModelName(data.utilityImageModel),
-    utilityVideoModel: normalizedUtilityVideoModelName(data.utilityVideoModel),
+    utilityVideoModel,
+    resultType: utilityModeValue === "video" ? utilityVideoOutputType(utilityVideoModel) : "image",
     dwposeDrawMode: data.dwposeDrawMode || "body-pose",
     patinaMaps: patinaMapsForData(data),
     patinaOutputFormat: data.patinaOutputFormat || "png",
@@ -7861,6 +8062,8 @@ function normalizeUtilityData(data = {}) {
     colorIdMatteSampleRadius: colorIdMatteSampleRadius(data.colorIdMatteSampleRadius),
     colorIdMatteInvert: Boolean(data.colorIdMatteInvert),
     sam3VideoDetectionThreshold: data.sam3VideoDetectionThreshold ?? 0.5,
+    extractFrameTime: data.extractFrameTime ?? 0,
+    extractFrameFormat: data.extractFrameFormat === "jpeg" ? "jpeg" : "png",
     batchCount: data.batchCount || "1",
     preprocessVideo: data.preprocessVideo !== false,
     preprocessType: data.preprocessType || "depth",

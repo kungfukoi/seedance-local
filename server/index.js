@@ -5,13 +5,15 @@ import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { File } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { fal } from "@fal-ai/client";
+import ffmpegStaticPath from "ffmpeg-static";
+import ffprobeStatic from "ffprobe-static";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,9 +24,12 @@ const savedWorkflowsDir = path.join(rootDir, "saved_workflows");
 const composerPosesDir = path.join(rootDir, "public", "models", "poses");
 const dataDir = path.join(__dirname, "data");
 const historyPath = path.join(dataDir, "history.json");
+const falDebugLogPath = path.join(dataDir, "fal-debug.log");
 const nodeProjectsPath = path.join(dataDir, "node-projects.json");
 let historyWriteQueue = Promise.resolve();
 const execFile = promisify(execFileCallback);
+const ffmpegBinaryPath = process.env.FFMPEG_PATH || ffmpegStaticPath || "ffmpeg";
+const ffprobeBinaryPath = process.env.FFPROBE_PATH || ffprobeStatic?.path || "ffprobe";
 const port = Number(process.env.PORT || 3333);
 const seedanceStandardCostPerSecond = Number(process.env.SEEDANCE_STANDARD_COST_PER_SECOND || 0.3034);
 const seedanceFastCostPerSecond = Number(process.env.SEEDANCE_FAST_COST_PER_SECOND || 0.2419);
@@ -196,7 +201,15 @@ app.get("/api/health", (_req, res) => {
       composerPoses: true,
       apiJsonErrors: true,
       voidFrameValidation: true,
-      sam3VideoMaskOutput: true
+      sam3VideoMaskOutput: true,
+      extractVideoFrame: true
+    },
+    ffmpeg: {
+      configured: Boolean(ffmpegBinaryPath),
+      bundled: Boolean(ffmpegStaticPath),
+      binary: ffmpegBinaryPath ? path.basename(ffmpegBinaryPath) : "",
+      ffprobeConfigured: Boolean(ffprobeBinaryPath),
+      ffprobeBundled: Boolean(ffprobeStatic?.path)
     },
     falKeyConfigured: Boolean(process.env.FAL_KEY),
     openAiKeyConfigured: Boolean(process.env.OPENAI_API_KEY || openAiTextApiKey || openAiImageApiKey),
@@ -626,6 +639,20 @@ app.post("/api/node/color-id-matte", upload.single("asset"), async (req, res) =>
   }
 });
 
+app.post("/api/node/extract-video-frame", async (req, res) => {
+  try {
+    const sourceVideoUrl = String(req.body.sourceVideoUrl || "").trim();
+    if (!sourceVideoUrl) {
+      return res.status(400).json({ error: "Connect a video to extract a frame." });
+    }
+
+    res.json(await createExtractFrameResult({ body: req.body, sourceVideoUrl }));
+  } catch (error) {
+    console.error(error);
+    sendApiError(res, error, "Extract frame failed.");
+  }
+});
+
 app.post("/api/node/process-text", async (req, res) => {
   try {
     const text = String(req.body.text || "").trim();
@@ -904,7 +931,7 @@ async function runSam3ImageSegmentation(req, res, { prompt, imagePromptUrls, ima
     include_boxes: true
   };
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteImage = firstFalImageResult(result?.data);
 
   if (!remoteImage?.url && Array.isArray(result?.data?.masks) && !result.data.masks.length) {
@@ -1030,7 +1057,7 @@ async function subscribeToFalWithTimeout(endpoint, input, label, timeoutMs = fal
   let timeoutId;
   try {
     return await Promise.race([
-      fal.subscribe(endpoint, { input, logs: true }),
+      subscribeFal(endpoint, { input, logs: true }),
       new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
           const error = new Error(`${label} timed out waiting for Fal. Try again in a moment.`);
@@ -1389,15 +1416,22 @@ async function runBirefnetUtilityImage(req, res, { imageUrl, selectedModel }) {
 
 app.post("/api/node/utility-video", async (req, res) => {
   try {
-    if (!process.env.FAL_KEY) {
-      return res.status(400).json({ error: "Missing FAL_KEY in .env." });
-    }
-
     const selectedVideoModel = resolveUtilityVideoModel(req.body.model);
     const prompt = String(req.body.prompt || "").trim();
     const referenceImageUrls = Array.isArray(req.body.referenceImageUrls) ? req.body.referenceImageUrls.filter(isLocalAssetUrl) : [];
     const referenceVideoUrls = Array.isArray(req.body.referenceVideoUrls) ? req.body.referenceVideoUrls.filter(isLocalAssetUrl) : [];
     const maskVideoUrls = Array.isArray(req.body.maskVideoUrls) ? req.body.maskVideoUrls.filter(isLocalAssetUrl) : [];
+
+    if (selectedVideoModel.provider === "local-extract-frame") {
+      return runExtractFrameUtilityVideo(req, res, {
+        referenceVideoUrls,
+        selectedVideoModel
+      });
+    }
+
+    if (!process.env.FAL_KEY) {
+      return res.status(400).json({ error: "Missing FAL_KEY in .env." });
+    }
 
     if (!prompt && selectedVideoModel.requiresPrompt) {
       return res.status(400).json({ error: `${selectedVideoModel.displayName} requires a prompt.` });
@@ -1489,7 +1523,7 @@ app.post("/api/node/qwen-camera-edit", async (req, res) => {
       enable_safety_checker: true
     };
 
-    const result = await fal.subscribe(endpoint, { input, logs: true });
+    const result = await subscribeFal(endpoint, { input, logs: true });
     const remoteImage = firstFalImageResult(result?.data);
 
     if (!remoteImage?.url) {
@@ -1551,6 +1585,15 @@ app.post("/api/node/qwen-camera-edit", async (req, res) => {
     res.status(500).json({ error: error.message || "Qwen camera edit failed." });
   }
 });
+
+async function runExtractFrameUtilityVideo(req, res, { referenceVideoUrls }) {
+  const sourceVideoUrl = referenceVideoUrls.at(-1);
+  if (!sourceVideoUrl) {
+    return res.status(400).json({ error: "Extract Frame requires a connected video." });
+  }
+
+  return res.json(await createExtractFrameResult({ body: req.body, sourceVideoUrl }));
+}
 
 app.post("/api/node/generate-video", async (req, res) => {
   try {
@@ -1639,7 +1682,7 @@ app.post("/api/node/generate-video", async (req, res) => {
     }
 
     const endpoint = `bytedance/seedance-2.0/${speedPrefix}${routeKind}`;
-    const result = await fal.subscribe(endpoint, { input, logs: true });
+    const result = await subscribeFal(endpoint, { input, logs: true });
     const remoteVideo = result?.data?.video;
 
     if (!remoteVideo?.url) {
@@ -1720,7 +1763,7 @@ async function runSam3VideoSegmentation(req, res, { prompt, referenceVideoUrls }
     detection_threshold: clampNumber(options.detectionThreshold, 0, 1, 0.5)
   };
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = normalizeFalFile(result?.data?.video);
 
   if (!remoteVideo?.url) {
@@ -1790,7 +1833,7 @@ async function runAuroraVideo(req, res, { prompt, referenceImageUrls, referenceA
     resolution
   };
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = result?.data?.video;
 
   if (!remoteVideo?.url) {
@@ -1856,7 +1899,7 @@ async function runHappyHorseReferenceVideo(req, res, { prompt, referenceImageUrl
   };
   if (seed !== undefined) input.seed = Math.min(2147483647, Math.max(0, seed));
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = normalizeFalFile(result?.data?.video);
 
   if (!remoteVideo?.url) {
@@ -1936,7 +1979,7 @@ async function runWanFunControlVideo(req, res, { prompt, referenceImageUrls, ref
   if (seed !== undefined) input.seed = seed;
   if (referenceImageUrl) input.reference_image_url = await uploadLocalOutputToFal(referenceImageUrl);
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = result?.data?.video;
 
   if (!remoteVideo?.url) {
@@ -2028,7 +2071,7 @@ async function runVoidVideoInpaintingUtility(req, res, { prompt, referenceVideoU
   if (seed !== undefined) input.seed = seed;
   if (maskVideoUrl) input.quad_mask_video_url = await uploadLocalOutputToFal(maskVideoUrl);
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = normalizeFalFile(result?.data?.video);
 
   if (!remoteVideo?.url) {
@@ -2119,7 +2162,7 @@ async function runBirefnetUtilityVideo(req, res, { referenceVideoUrls, selectedV
     input.operating_resolution = "2048x2048";
   }
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = normalizeFalFile(result?.data?.video) || findFalMediaFile(result?.data, "video/");
   const remoteMaskVideo = normalizeFalFile(result?.data?.mask_video);
 
@@ -2223,7 +2266,7 @@ async function runRifeVideoInterpolation(req, res, { referenceVideoUrls, selecte
   };
   if (!useCalculatedFps) input.fps = clampInteger(options.fps, 1, 120, 24);
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = normalizeFalFile(result?.data?.video);
 
   if (!remoteVideo?.url) {
@@ -2297,7 +2340,7 @@ async function runBytedanceVideoUpscaler(req, res, { referenceVideoUrls, selecte
   };
   if (scaleRatio !== undefined) input.scale_ratio = Math.min(10, Math.max(1.1, scaleRatio));
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = normalizeFalFile(result?.data?.video);
 
   if (!remoteVideo?.url) {
@@ -2380,7 +2423,7 @@ async function runTopazVideoUpscaler(req, res, { referenceVideoUrls, selectedVid
   addOptionalRangeInput(input, "grain", options.grain, 0, 0.1);
   addOptionalRangeInput(input, "recover_detail", options.recoverDetail, 0, 1);
 
-  const result = await fal.subscribe(endpoint, { input, logs: true });
+  const result = await subscribeFal(endpoint, { input, logs: true });
   const remoteVideo = normalizeFalFile(result?.data?.video);
 
   if (!remoteVideo?.url) {
@@ -2518,7 +2561,7 @@ app.post(
         input.image_urls = imageUrls;
       }
 
-      const result = await fal.subscribe(route.endpoint, {
+      const result = await subscribeFal(route.endpoint, {
         input,
         logs: true,
         onQueueUpdate: (update) => {
@@ -2856,7 +2899,7 @@ async function probeVideoFile(filePath) {
 
   try {
     const { stdout } = await execFile(
-      "ffprobe",
+      ffprobeBinaryPath,
       [
         "-v",
         "error",
@@ -2883,6 +2926,160 @@ async function probeVideoFile(filePath) {
   } catch {
     return {};
   }
+}
+
+async function createExtractFrameResult({ body, sourceVideoUrl }) {
+  let outputPath = "";
+  try {
+    const sourceVideo = resolveLocalAssetPathFromUrl(sourceVideoUrl);
+    const metadata = await probeVideoFile(sourceVideo.filePath);
+    const options = body.extractFrame && typeof body.extractFrame === "object" ? body.extractFrame : body;
+    const format = normalizeExtractFrameFormat(options.format);
+    const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
+    const extension = format === "jpeg" ? ".jpg" : ".png";
+    const frameTime = extractFrameTime(options.frameTime, metadata.duration);
+    const fileName = uniqueOutputFileName("video-frame", extension);
+    outputPath = path.join(outputsDir, fileName);
+
+    await extractVideoFrameWithFfmpeg({
+      sourcePath: sourceVideo.filePath,
+      outputPath,
+      frameTime,
+      format
+    });
+
+    const outputStats = await stat(outputPath);
+    const localUrl = `/outputs/${fileName}`;
+    const text = `Video frame at ${formatFrameTimeLabel(frameTime)}.`;
+    const cost = {
+      amountUsd: 0,
+      currency: "USD",
+      unitRateUsd: 0,
+      units: 1,
+      unit: "local frame",
+      mediaType: "image",
+      pricingBasis: "Local ffmpeg frame extraction",
+      pricingSource: "local-ffmpeg"
+    };
+
+    await appendHistory({
+      id: randomUUID(),
+      createdAt: new Date().toISOString(),
+      mediaType: "image",
+      provider: "local",
+      modelName: "Extract Frame",
+      endpoint: "local/extract-video-frame",
+      mode: "Video frame extraction",
+      prompt: text,
+      submittedPrompt: text,
+      project: projectFromBody(body),
+      node: nodeFromBody(body),
+      settings: {
+        model: "Extract Frame",
+        sourceVideoUrl,
+        frameTime,
+        requestedFrameTime: Number(options.frameTime || 0),
+        duration: metadata.duration || null,
+        width: metadata.width || null,
+        height: metadata.height || null,
+        fps: metadata.fps || null,
+        format,
+        ffmpeg: path.basename(ffmpegBinaryPath)
+      },
+      cost,
+      localImage: localUrl,
+      outputFileName: fileName,
+      outputBytes: outputStats.size,
+      text
+    });
+
+    return {
+      modelName: "Extract Frame",
+      text,
+      cost,
+      image: {
+        label: "Video Frame",
+        localUrl,
+        fileName,
+        mimeType
+      }
+    };
+  } catch (error) {
+    if (outputPath) await rm(outputPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function extractVideoFrameWithFfmpeg({ sourcePath, outputPath, frameTime, format }) {
+  const args = [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-y",
+    "-ss",
+    formatFfmpegSeconds(frameTime),
+    "-i",
+    sourcePath,
+    "-frames:v",
+    "1",
+    "-an"
+  ];
+
+  if (format === "jpeg") {
+    args.push("-q:v", "2");
+  } else {
+    args.push("-compression_level", "3");
+  }
+
+  args.push(outputPath);
+  await runFfmpeg(args, "Extract frame");
+}
+
+async function runFfmpeg(args, label, timeoutMs = 120000) {
+  if (!ffmpegBinaryPath) {
+    const error = new Error("Bundled ffmpeg is not available for this platform.");
+    error.status = 503;
+    throw error;
+  }
+
+  try {
+    return await execFile(ffmpegBinaryPath, args, { windowsHide: true, timeout: timeoutMs });
+  } catch (error) {
+    const detail = String(error.stderr || error.message || "").trim();
+    const message = detail ? `${label} failed: ${tailText(detail, 900)}` : `${label} failed.`;
+    const nextError = new Error(message);
+    nextError.status = 500;
+    nextError.cause = error;
+    throw nextError;
+  }
+}
+
+function tailText(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? text.slice(text.length - maxLength) : text;
+}
+
+function extractFrameTime(value, duration) {
+  const requested = Math.max(0, Number(value) || 0);
+  const safeDuration = positiveNumber(duration);
+  if (!safeDuration) return requested;
+  return Math.min(requested, Math.max(0, safeDuration - 0.001));
+}
+
+function normalizeExtractFrameFormat(value) {
+  return String(value || "").toLowerCase() === "jpeg" ? "jpeg" : "png";
+}
+
+function formatFfmpegSeconds(value) {
+  return Math.max(0, Number(value) || 0).toFixed(3);
+}
+
+function formatFrameTimeLabel(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds - minutes * 60;
+  if (minutes > 0) return `${minutes}:${remainder.toFixed(2).padStart(5, "0")}`;
+  return `${remainder.toFixed(2)}s`;
 }
 
 function enrichVideoMetadata(video, metadata = {}) {
@@ -3017,6 +3214,214 @@ async function readHistory() {
     await rm(historyPath, { force: true });
     return [];
   }
+}
+
+async function subscribeFal(endpoint, options = {}, context = {}) {
+  const startedAt = Date.now();
+  const inputSummary = summarizeFalValue(options.input, "input");
+  const originalOnEnqueue = options.onEnqueue;
+  const originalOnQueueUpdate = options.onQueueUpdate;
+  const seenLogKeys = new Set();
+  let requestId = "";
+  let lastStatus = "";
+  let lastQueuePosition = "";
+
+  writeFalDebugLog({
+    event: "submit",
+    endpoint,
+    context,
+    input: inputSummary
+  });
+
+  try {
+    const result = await fal.subscribe(endpoint, {
+      ...options,
+      logs: options.logs ?? true,
+      onEnqueue: (nextRequestId) => {
+        requestId = nextRequestId || requestId;
+        writeFalDebugLog({
+          event: "enqueued",
+          endpoint,
+          requestId,
+          context
+        });
+        originalOnEnqueue?.(nextRequestId);
+      },
+      onQueueUpdate: (update) => {
+        requestId = update?.request_id || requestId;
+        const status = update?.status || "UNKNOWN";
+        const queuePosition = update?.queue_position ?? update?.position ?? null;
+        const positionKey = queuePosition === null || queuePosition === undefined ? "" : String(queuePosition);
+
+        if (status !== lastStatus || positionKey !== lastQueuePosition) {
+          lastStatus = status;
+          lastQueuePosition = positionKey;
+          writeFalDebugLog({
+            event: "queue",
+            endpoint,
+            requestId,
+            status,
+            queuePosition,
+            elapsedMs: Date.now() - startedAt,
+            context
+          });
+        }
+
+        for (const log of update?.logs || []) {
+          const message = String(log?.message || "").trim();
+          if (!message) continue;
+          const logKey = `${log?.timestamp || ""}:${log?.level || ""}:${message}`;
+          if (seenLogKeys.has(logKey)) continue;
+          seenLogKeys.add(logKey);
+          writeFalDebugLog({
+            event: "log",
+            endpoint,
+            requestId,
+            level: log?.level || "",
+            source: log?.source || "",
+            timestamp: log?.timestamp || "",
+            message: truncateString(message, 1000),
+            elapsedMs: Date.now() - startedAt,
+            context
+          });
+        }
+
+        originalOnQueueUpdate?.(update);
+      }
+    });
+
+    writeFalDebugLog({
+      event: "completed",
+      endpoint,
+      requestId: result?.requestId || requestId,
+      elapsedMs: Date.now() - startedAt,
+      output: summarizeFalValue(result?.data, "output"),
+      context
+    });
+    return result;
+  } catch (error) {
+    writeFalDebugLog({
+      event: "failed",
+      endpoint,
+      requestId,
+      elapsedMs: Date.now() - startedAt,
+      error: summarizeFalError(error),
+      context
+    });
+    throw error;
+  }
+}
+
+function writeFalDebugLog(entry) {
+  const line = JSON.stringify({
+    createdAt: new Date().toISOString(),
+    ...entry
+  });
+  const consoleMessage = formatFalDebugConsoleLine(entry);
+  if (consoleMessage) console.log(consoleMessage);
+
+  void (async () => {
+    await mkdir(dataDir, { recursive: true });
+    await appendFile(falDebugLogPath, `${line}\n`);
+  })().catch((error) => {
+    console.warn("Fal debug log write failed:", error.message);
+  });
+}
+
+function formatFalDebugConsoleLine(entry) {
+  const request = entry.requestId ? ` ${entry.requestId}` : "";
+  if (entry.event === "log") return `[fal:${entry.endpoint}${request}] ${entry.message}`;
+  if (entry.event === "queue") {
+    const position = entry.queuePosition === null || entry.queuePosition === undefined ? "" : ` position=${entry.queuePosition}`;
+    return `[fal:${entry.endpoint}${request}] ${entry.status}${position}`;
+  }
+  if (entry.event === "failed") return `[fal:${entry.endpoint}${request}] failed: ${entry.error?.message || "unknown error"}`;
+  if (entry.event === "completed") return `[fal:${entry.endpoint}${request}] completed in ${Math.round((entry.elapsedMs || 0) / 1000)}s`;
+  if (entry.event === "enqueued") return `[fal:${entry.endpoint}${request}] enqueued`;
+  if (entry.event === "submit") return `[fal:${entry.endpoint}] submit`;
+  return "";
+}
+
+function summarizeFalError(error) {
+  return {
+    name: error?.name || "",
+    message: truncateString(publicErrorMessage(error, error?.message || "Fal request failed."), 1000),
+    status: errorStatusCode(error),
+    requestId: error?.requestId || error?.body?.request_id || error?.data?.request_id || "",
+    body: summarizeFalValue(error?.body || error?.data || error?.response?.data || null, "error")
+  };
+}
+
+function summarizeFalValue(value, key = "", depth = 0) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+
+  const normalizedKey = String(key || "").toLowerCase();
+  if (typeof value === "string") {
+    if (normalizedKey.includes("key") || normalizedKey.includes("token") || normalizedKey.includes("authorization")) {
+      return "[redacted]";
+    }
+    if (normalizedKey.includes("url") || /^https?:\/\//i.test(value) || value.startsWith("/outputs/") || value.startsWith("/uploads/")) {
+      return summarizeFalUrl(value);
+    }
+    if (normalizedKey.includes("prompt") || normalizedKey.includes("text") || value.length > 160) {
+      return {
+        type: "string",
+        length: value.length,
+        preview: truncateString(value.replace(/\s+/g, " ").trim(), 180)
+      };
+    }
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 8).map((item, index) => summarizeFalValue(item, `${key}[${index}]`, depth + 1));
+    if (value.length > items.length) items.push({ omitted: value.length - items.length });
+    return items;
+  }
+
+  if (typeof value === "object") {
+    if (depth >= 4) {
+      return {
+        type: "object",
+        keys: Object.keys(value).slice(0, 20)
+      };
+    }
+    return Object.fromEntries(
+      Object.entries(value).map(([nextKey, nextValue]) => [nextKey, summarizeFalValue(nextValue, nextKey, depth + 1)])
+    );
+  }
+
+  return String(value);
+}
+
+function summarizeFalUrl(value) {
+  if (value.startsWith("/outputs/") || value.startsWith("/uploads/")) {
+    return {
+      type: "local-url",
+      path: value.replace(/^\/(outputs|uploads)\//, "/$1/.../")
+    };
+  }
+
+  try {
+    const parsed = new URL(value);
+    return {
+      type: "remote-url",
+      host: parsed.hostname,
+      file: path.basename(parsed.pathname) || ""
+    };
+  } catch {
+    return {
+      type: "url",
+      length: value.length,
+      preview: truncateString(value, 120)
+    };
+  }
+}
+
+function truncateString(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}...` : text;
 }
 
 async function appendHistory(item) {
@@ -3660,7 +4065,7 @@ async function processTextWithFal({ text, textInputs, imageInputs, videoInputs }
   const imageContext = await describeImageInputs(imageInputs);
   const videoContext = await describeVideoInputs(videoInputs);
   const prompt = buildTextProcessingPrompt({ text, textInputs, imageDescriptions: imageContext.descriptions, videoDescriptions: videoContext.descriptions });
-  const data = await fal.subscribe("fal-ai/any-llm", {
+  const data = await subscribeFal("fal-ai/any-llm", {
     input: {
       model,
       prompt
@@ -3738,7 +4143,7 @@ async function describeImageInputs(imageInputs) {
   if (!imageInputs.length) return { descriptions: [], usages: [] };
 
   const imageUrls = await Promise.all(imageInputs.map((item) => localAssetToFalUrl(item.url)));
-  const data = await fal.subscribe("openrouter/router/vision", {
+  const data = await subscribeFal("openrouter/router/vision", {
     input: {
       image_urls: imageUrls,
       prompt: "Describe these images as concise visual prompt context. Focus on subject, setting, composition, camera, lighting, palette, mood, materials, and any important details.",
@@ -3758,7 +4163,7 @@ async function describeVideoInputs(videoInputs) {
   if (!videoInputs.length) return { descriptions: [], usages: [] };
 
   const videoUrls = await Promise.all(videoInputs.map((item) => localAssetToFalUrl(item.url)));
-  const data = await fal.subscribe("openrouter/router/video", {
+  const data = await subscribeFal("openrouter/router/video", {
     input: {
       video_urls: videoUrls,
       prompt: "Describe these videos as concise visual prompt context. Focus on subjects, actions, setting, camera movement, lighting, style, mood, and any useful continuity details.",
@@ -3931,6 +4336,15 @@ function resolveUtilityImageModel(model) {
 
 function resolveUtilityVideoModel(model) {
   const normalized = String(model || "").toLowerCase();
+  if (normalized.includes("extract") || normalized.includes("current frame") || normalized.includes("video frame")) {
+    return {
+      provider: "local-extract-frame",
+      displayName: "Extract Frame",
+      id: "local/extract-video-frame",
+      requiresPrompt: false
+    };
+  }
+
   if (normalized.includes("sam") && normalized.includes("video")) {
     return {
       provider: "fal-sam3-video",
@@ -4591,6 +5005,25 @@ async function readLocalAsset(publicPath) {
     buffer,
     mimeType: mimeForExtension(path.extname(fileName).toLowerCase())
   };
+}
+
+function resolveLocalAssetPathFromUrl(value) {
+  return resolveLocalAssetPath(localPublicPathFromUrl(value));
+}
+
+function localPublicPathFromUrl(value) {
+  const raw = String(value || "").trim();
+  if (isLocalAssetUrl(raw)) return raw;
+
+  try {
+    const parsed = new URL(raw, "http://localhost");
+    const publicPath = decodeURIComponent(parsed.pathname || "");
+    if (isLocalAssetUrl(publicPath)) return publicPath;
+  } catch {
+    // Fall through to the clear validation error below.
+  }
+
+  throw new Error("Extract Frame can only read local Newt Node videos from uploads or outputs.");
 }
 
 function resolveLocalAssetPath(publicPath) {

@@ -8,6 +8,7 @@ outputs/*
 saved_workflows/*.json
 server/data/history.json
 server/data/node-projects.json
+server/data/*.log
 .vs_ai_logs/
 .newtnode_logs/
 !uploads/.gitkeep
